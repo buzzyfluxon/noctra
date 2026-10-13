@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keep the Gemini API key out of Android backups. -->
+<full-backup-content>
+    <exclude domain="file" path="datastore/noc_ai.preferences_pb" />
+</full-backup-content>

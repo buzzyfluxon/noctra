@@ -25,6 +25,13 @@ enum class TaskStatus(val label: String) {
     POSTPONED("Postponed")
 }
 
+enum class PauseReason(val label: String) {
+    BREAK("Taking a break"),
+    DISTRACTED("Got distracted"),
+    STUCK("Stuck on it"),
+    OTHER("Something else")
+}
+
 enum class ActivityKind { STUDY, BREAK, DISTRACTION }
 
 enum class CheckInResponse { COMPLETED, STILL_WORKING, DISTRACTED, STUCK, BREAK }
@@ -46,10 +53,20 @@ data class TaskEntity(
     val planDate: String,
     val postponeCount: Int = 0,
     val completedAt: Long? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Set while the task timer is running. */
+    val runningSince: Long? = null,
+    /** Time already worked in finished timer runs. */
+    val workedMs: Long = 0,
+    val pausedAt: Long? = null,
+    val pauseReason: PauseReason? = null
 ) {
     val subjectLabel: String
         get() = if (subject == Subject.CUSTOM && customSubject.isNotBlank()) customSubject else subject.label
+
+    val isRunning: Boolean get() = runningSince != null
+
+    fun workedAt(now: Long): Long = workedMs + (runningSince?.let { (now - it).coerceAtLeast(0) } ?: 0L)
 }
 
 @Entity(

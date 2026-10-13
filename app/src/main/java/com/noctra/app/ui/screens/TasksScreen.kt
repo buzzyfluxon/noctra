@@ -26,6 +26,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +45,7 @@ import com.noctra.app.ui.components.EmptyState
 import com.noctra.app.ui.components.LightBackdrop
 import com.noctra.app.ui.components.NcCard
 import com.noctra.app.ui.components.NcProgress
+import com.noctra.app.ui.components.PauseReasonDialog
 import com.noctra.app.ui.components.Pill
 import com.noctra.app.ui.components.SubjectChip
 import com.noctra.app.ui.components.subjectColors
@@ -50,6 +53,7 @@ import com.noctra.app.ui.components.subjectTint
 import com.noctra.app.viewmodel.PlanFilter
 import com.noctra.app.viewmodel.PlannerViewModel
 import com.noctra.app.viewmodel.TaskRow
+import kotlinx.coroutines.delay
 import java.time.LocalDate
 
 @Composable
@@ -57,6 +61,15 @@ fun TasksScreen(onAdd: () -> Unit, onEdit: (Long) -> Unit, vm: PlannerViewModel 
     val ui by vm.ui.collectAsStateWithLifecycle()
     var completeFor by remember { mutableStateOf<TaskEntity?>(null) }
     var postponeFor by remember { mutableStateOf<TaskEntity?>(null) }
+    var pauseFor by remember { mutableStateOf<TaskEntity?>(null) }
+    val anyRunning = ui.rows.any { it.task.isRunning }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(anyRunning) {
+        while (anyRunning) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
 
     LightBackdrop {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -93,7 +106,9 @@ fun TasksScreen(onAdd: () -> Unit, onEdit: (Long) -> Unit, vm: PlannerViewModel 
                         onClick = { onEdit(row.task.id) },
                         onUp = { vm.move(ui.rows, index, true) },
                         onDown = { vm.move(ui.rows, index, false) },
+                        now = now,
                         onStart = { vm.start(row.task.id) },
+                        onPause = { pauseFor = row.task },
                         onDone = { completeFor = row.task },
                         onPostpone = { postponeFor = row.task }
                     )
@@ -112,6 +127,9 @@ fun TasksScreen(onAdd: () -> Unit, onEdit: (Long) -> Unit, vm: PlannerViewModel 
         ConfirmDialog("Mark as completed?", "\"${t.title}\" will be recorded as done now.", "YES, COMPLETED",
             { vm.complete(t.id); completeFor = null }, { completeFor = null })
     }
+    pauseFor?.let { t ->
+        PauseReasonDialog(t.title, { reason -> vm.pause(t.id, reason); pauseFor = null }, { pauseFor = null })
+    }
     postponeFor?.let { t ->
         ConfirmDialog("Postpone to tomorrow?", "\"${t.title}\" moves to tomorrow. Postponements are counted.", "POSTPONE",
             { vm.postpone(t.id); postponeFor = null }, { postponeFor = null })
@@ -126,7 +144,9 @@ private fun TaskCard(
     onClick: () -> Unit,
     onUp: () -> Unit,
     onDown: () -> Unit,
+    now: Long,
     onStart: () -> Unit,
+    onPause: () -> Unit,
     onDone: () -> Unit,
     onPostpone: () -> Unit
 ) {
@@ -165,6 +185,18 @@ private fun TaskCard(
             if (t.postponeCount > 0) Text("· postponed ${t.postponeCount}x", style = MaterialTheme.typography.bodySmall)
             if (row.subTotal > 0) Text("· ${row.subDone}/${row.subTotal} subtasks", style = MaterialTheme.typography.bodySmall)
         }
+        if (!finished && (t.isRunning || t.pausedAt != null)) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                if (t.isRunning) {
+                    "Running ${TimeUtil.clockDuration(t.workedAt(now))} of ${TimeUtil.duration(t.estimateMin.toLong())}"
+                } else {
+                    "Paused${t.pauseReason?.let { " · ${it.label.lowercase()}" } ?: ""} · worked ${TimeUtil.duration(t.workedMs / 60_000L)}"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
         t.deadlineEpochDay?.let {
             Text(
                 "Deadline ${LocalDate.ofEpochDay(it)}",
@@ -176,7 +208,11 @@ private fun TaskCard(
         NcProgress(t.progress / 100f, fill = subjectColors(t.subject).second)
         if (!finished) {
             Row {
-                TextButton(onClick = onStart) { Text("START") }
+                if (t.isRunning) {
+                    TextButton(onClick = onPause) { Text("PAUSE") }
+                } else {
+                    TextButton(onClick = onStart) { Text(if (t.pausedAt != null) "RESUME" else "START") }
+                }
                 TextButton(onClick = onDone) { Text("DONE") }
                 TextButton(onClick = onPostpone) { Text("POSTPONE") }
             }

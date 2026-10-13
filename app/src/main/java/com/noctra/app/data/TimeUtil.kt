@@ -28,10 +28,24 @@ object TimeUtil {
         return t.toInstant().toEpochMilli()
     }
 
+    fun lastOccurrence(hour: Int, minute: Int, now: Long): Long {
+        var t = Instant.ofEpochMilli(now).atZone(zone).toLocalDate().atTime(hour, minute).atZone(zone)
+        if (t.toInstant().toEpochMilli() > now) t = t.minusDays(1)
+        return t.toInstant().toEpochMilli()
+    }
+
     fun duration(min: Long): String = when {
         min < 60 -> "${min}m"
         min % 60 == 0L -> "${min / 60}h"
         else -> "${min / 60}h ${min % 60}m"
+    }
+
+    fun clockDuration(ms: Long): String {
+        val total = (ms / 1000).coerceAtLeast(0)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val s = total % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
     }
 
     fun startOfDay(date: String): Long =

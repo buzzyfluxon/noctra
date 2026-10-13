@@ -18,7 +18,11 @@ import com.noctra.app.data.CheckInOutcome
 import com.noctra.app.data.DailyReport
 import com.noctra.app.data.DaySession
 import com.noctra.app.data.DayStats
+import com.noctra.app.data.NocAgent
+import com.noctra.app.data.NocConfig
 import com.noctra.app.data.NoctraRepository
+import com.noctra.app.data.PauseReason
+import com.noctra.app.data.Gemini
 import com.noctra.app.data.Stats
 import com.noctra.app.data.SubtaskEntity
 import com.noctra.app.data.TaskEntity
@@ -87,6 +91,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUi())
 
     fun startTask(id: Long) = viewModelScope.launch { repo.startTask(id) }
+    fun pauseTask(id: Long, reason: PauseReason) = viewModelScope.launch { repo.pauseTask(id, reason) }
     fun completeTask(id: Long) = viewModelScope.launch { repo.completeTask(id) }
     fun setProgress(id: Long, p: Int, est: Int) = viewModelScope.launch { repo.setProgress(id, p, est) }
     fun startBreak() = viewModelScope.launch { repo.startBreak() }
@@ -131,6 +136,7 @@ class PlannerViewModel(app: Application) : AndroidViewModel(app) {
     fun postpone(id: Long) = viewModelScope.launch { repo.postpone(id) }
     fun complete(id: Long) = viewModelScope.launch { repo.completeTask(id) }
     fun start(id: Long) = viewModelScope.launch { repo.startTask(id) }
+    fun pause(id: Long, reason: PauseReason) = viewModelScope.launch { repo.pauseTask(id, reason) }
     fun delete(id: Long) = viewModelScope.launch { repo.deleteTask(id) }
 }
 
@@ -200,9 +206,16 @@ class WakeViewModel(app: Application) : AndroidViewModel(app) {
     val session: StateFlow<DaySession?> = repo.openSession()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
-    fun confirm(done: () -> Unit) {
+    fun confirm(at: Long?, done: () -> Unit) {
         viewModelScope.launch {
-            repo.confirmWake()
+            repo.confirmWake(at)
+            done()
+        }
+    }
+
+    fun changeWake(at: Long, done: () -> Unit = {}) {
+        viewModelScope.launch {
+            repo.updateWakeTime(at)
             done()
         }
     }
@@ -345,12 +358,20 @@ class ReportViewModel(app: Application, handle: SavedStateHandle) : AndroidViewM
 
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = (app as NoctraApp).repo
+    private val nocStore = (app as NoctraApp).nocStore
     val settings: StateFlow<AppSettings> = repo.settings.flow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
+    val noc: StateFlow<NocConfig> = nocStore.flow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NocConfig())
+
+    fun setNocKey(key: String) = viewModelScope.launch { nocStore.setKey(key) }
+    fun clearNocKey() = viewModelScope.launch { nocStore.clearKey() }
+    fun setNocModel(model: String) = viewModelScope.launch { nocStore.setModel(model) }
 
     fun setWakeTime(h: Int, m: Int) = viewModelScope.launch { repo.setWakeTime(h, m) }
     fun setWakeEnabled(v: Boolean) = viewModelScope.launch { repo.setWakeEnabled(v) }
     fun setInterval(min: Int) = viewModelScope.launch { repo.setInterval(min) }
+    fun setTheme(t: String) = viewModelScope.launch { repo.settings.setTheme(t) }
     fun setTone(t: String) = viewModelScope.launch { repo.settings.setTone(t) }
     fun addSubject(name: String) = viewModelScope.launch { repo.settings.addSubject(name.trim()) }
     fun removeSubject(name: String) = viewModelScope.launch { repo.settings.removeSubject(name) }
@@ -363,5 +384,99 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun export(onReady: (String) -> Unit) {
         viewModelScope.launch { onReady(repo.exportCsv()) }
+    }
+}
+
+enum class NocRole { USER, NOC, ACTION, ERROR }
+
+data class NocMessage(val id: Long, val role: NocRole, val text: String)
+
+class NocViewModel(app: Application) : AndroidViewModel(app) {
+    private val nocApp = app as NoctraApp
+    private val agent = NocAgent(nocApp.repo)
+    private var nextId = 1L
+
+    val config: StateFlow<NocConfig> = nocApp.nocStore.flow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NocConfig())
+
+    var messages by mutableStateOf<List<NocMessage>>(emptyList())
+        private set
+    var sending by mutableStateOf(false)
+        private set
+
+    private fun add(role: NocRole, text: String) {
+        messages = messages + NocMessage(nextId++, role, text)
+    }
+
+    fun send(text: String) {
+        val t = text.trim()
+        if (t.isEmpty() || sending) return
+        add(NocRole.USER, t)
+        sending = true
+        viewModelScope.launch {
+            try {
+                val cfg = nocApp.nocStore.current()
+                val tone = nocApp.repo.settings.current().tone
+                val reply = agent.chat(t, cfg, tone) { add(NocRole.ACTION, it) }
+                add(NocRole.NOC, reply)
+            } catch (e: Gemini.ApiException) {
+                add(NocRole.ERROR, e.message ?: "Something went wrong.")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                add(NocRole.ERROR, "Something went wrong: ${e.message ?: "unknown error"}")
+            } finally {
+                sending = false
+            }
+        }
+    }
+
+    fun clear() {
+        if (sending) return
+        agent.reset()
+        messages = emptyList()
+    }
+
+    fun saveKey(key: String) = viewModelScope.launch { nocApp.nocStore.setKey(key) }
+}
+
+data class TimeUpUi(val loaded: Boolean = false, val task: TaskEntity? = null, val workedMin: Long = 0)
+
+class TimeUpViewModel(app: Application, handle: SavedStateHandle) : AndroidViewModel(app) {
+    private val repo = (app as NoctraApp).repo
+    private val taskId: Long = handle.get<Long>("taskId") ?: 0L
+    var ui by mutableStateOf(TimeUpUi())
+        private set
+
+    init {
+        refresh()
+    }
+
+    private fun refresh() {
+        viewModelScope.launch {
+            val t = repo.getTask(taskId)
+            ui = TimeUpUi(true, t, (t?.workedAt(System.currentTimeMillis()) ?: 0L) / 60_000L)
+        }
+    }
+
+    fun complete(done: () -> Unit) {
+        viewModelScope.launch {
+            repo.completeTask(taskId)
+            done()
+        }
+    }
+
+    fun extend(minutes: Int, done: () -> Unit) {
+        viewModelScope.launch {
+            repo.extendTask(taskId, minutes)
+            done()
+        }
+    }
+
+    fun pause(reason: PauseReason, done: () -> Unit) {
+        viewModelScope.launch {
+            repo.pauseTask(taskId, reason)
+            done()
+        }
     }
 }

@@ -7,11 +7,15 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+
+val LocalIsDark = staticCompositionLocalOf { false }
 
 object NC {
     val Ink = Color(0xFF12102A)
@@ -82,10 +86,12 @@ private val NcShapes = Shapes(
 
 @Composable
 fun NoctraTheme(dark: Boolean = false, content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = if (dark) DarkScheme else LightScheme,
-        typography = NcTypography,
-        shapes = NcShapes,
-        content = content
-    )
+    CompositionLocalProvider(LocalIsDark provides dark) {
+        MaterialTheme(
+            colorScheme = if (dark) DarkScheme else LightScheme,
+            typography = NcTypography,
+            shapes = NcShapes,
+            content = content
+        )
+    }
 }

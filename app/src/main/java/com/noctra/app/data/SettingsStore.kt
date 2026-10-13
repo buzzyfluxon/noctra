@@ -20,6 +20,7 @@ data class AppSettings(
     val wakeMinute: Int = 0,
     val intervalMin: Int = 60,
     val tone: String = "BRUTAL",
+    val theme: String = "SYSTEM",
     val customSubjects: List<String> = emptyList()
 )
 
@@ -31,6 +32,7 @@ class SettingsStore(private val context: Context) {
         val wakeMinute = intPreferencesKey("wake_minute")
         val interval = intPreferencesKey("interval_min")
         val tone = stringPreferencesKey("tone")
+        val theme = stringPreferencesKey("theme")
         val subjects = stringSetPreferencesKey("custom_subjects")
     }
 
@@ -42,6 +44,7 @@ class SettingsStore(private val context: Context) {
             wakeMinute = p[K.wakeMinute] ?: 0,
             intervalMin = p[K.interval] ?: 60,
             tone = p[K.tone] ?: "BRUTAL",
+            theme = p[K.theme] ?: "SYSTEM",
             customSubjects = (p[K.subjects] ?: emptySet()).sorted()
         )
     }
@@ -65,6 +68,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setInterval(min: Int) {
         context.settingsDs.edit { it[K.interval] = min }
+    }
+
+    suspend fun setTheme(theme: String) {
+        context.settingsDs.edit { it[K.theme] = theme }
     }
 
     suspend fun setTone(tone: String) {

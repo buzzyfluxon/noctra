@@ -21,6 +21,9 @@ interface TaskDao {
     @Query("SELECT * FROM tasks WHERE id = :id")
     suspend fun get(id: Long): TaskEntity?
 
+    @Query("SELECT * FROM tasks WHERE runningSince IS NOT NULL")
+    suspend fun running(): List<TaskEntity>
+
     @Query("SELECT COALESCE(MAX(sortOrder), 0) FROM tasks")
     suspend fun maxOrder(): Int
 

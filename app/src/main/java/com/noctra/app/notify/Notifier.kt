@@ -21,7 +21,10 @@ object Actions {
     const val CHECKIN_STILL = "com.noctra.app.CHECKIN_STILL"
     const val CHECKIN_BREAK = "com.noctra.app.CHECKIN_BREAK"
     const val END_BREAK = "com.noctra.app.END_BREAK"
+    const val TASK_TIMER = "com.noctra.app.TASK_TIMER"
+    const val EXTEND_15 = "com.noctra.app.EXTEND_15"
     const val EXTRA_CHECKIN_ID = "checkin_id"
+    const val EXTRA_TASK_ID = "task_id"
 }
 
 object Notifier {
@@ -29,9 +32,11 @@ object Notifier {
     const val CH_WAKE = "wake"
     const val CH_CHECKIN = "checkin"
     const val CH_BREAK = "break"
+    const val CH_TIMER = "task_timer"
     const val WAKE_ID = 1
     const val CHECKIN_ID = 2
     const val BREAK_ID = 3
+    const val TIMEUP_ID = 4
 
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -43,6 +48,11 @@ object Notifier {
         nm.createNotificationChannel(
             NotificationChannel(CH_CHECKIN, "Accountability checks", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Periodic check-ins about your current task"
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_TIMER, "Task time is up", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Asks what happened when a task reaches its planned time"
             }
         )
         nm.createNotificationChannel(
@@ -62,9 +72,10 @@ object Notifier {
         )
     }
 
-    private fun broadcast(ctx: Context, code: Int, action: String, checkInId: Long = 0): PendingIntent {
+    private fun broadcast(ctx: Context, code: Int, action: String, checkInId: Long = 0, taskId: Long = 0): PendingIntent {
         val intent = Intent(ctx, ActionReceiver::class.java).setAction(action)
             .putExtra(Actions.EXTRA_CHECKIN_ID, checkInId)
+            .putExtra(Actions.EXTRA_TASK_ID, taskId)
         return PendingIntent.getBroadcast(
             ctx, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -95,6 +106,7 @@ object Notifier {
             .setContentIntent(activity(ctx, 10, "wake"))
             .addAction(0, "YES, I'M UP", broadcast(ctx, 11, Actions.WAKE_YES))
             .addAction(0, "NOT YET", broadcast(ctx, 12, Actions.WAKE_LATER))
+            .addAction(0, "I WOKE EARLIER", activity(ctx, 13, "wake"))
             .build()
         post(ctx, WAKE_ID, n)
     }
@@ -120,6 +132,24 @@ object Notifier {
             .addAction(0, "ANSWER IN APP", open)
             .build()
         post(ctx, CHECKIN_ID, n)
+    }
+
+    fun showTaskTimeUp(ctx: Context, taskId: Long, title: String, plannedMin: Int, workedMin: Long) {
+        val text = "\"$title\": ${TimeUtil.duration(plannedMin.toLong())} planned, ${TimeUtil.duration(workedMin)} worked. What happened?"
+        val open = activity(ctx, 40, "timeup/$taskId")
+        val n = NotificationCompat.Builder(ctx, CH_TIMER)
+            .setSmallIcon(R.drawable.ic_stat_noctra)
+            .setContentTitle("TIME'S UP")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setAutoCancel(true)
+            .setContentIntent(open)
+            .addAction(0, "+15 MIN", broadcast(ctx, 41, Actions.EXTEND_15, taskId = taskId))
+            .addAction(0, "ANSWER IN APP", open)
+            .build()
+        post(ctx, TIMEUP_ID, n)
     }
 
     fun showBreak(ctx: Context, startedAt: Long) {

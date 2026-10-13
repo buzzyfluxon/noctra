@@ -34,6 +34,10 @@ class Scheduler(private val ctx: Context) {
 
     fun scheduleCheckIn(at: Long) = set(at, pi(Actions.CHECKIN, 1002))
 
+    fun scheduleTaskTimer(at: Long) = set(at, pi(Actions.TASK_TIMER, 1003))
+
+    fun cancelTaskTimer() = am.cancel(pi(Actions.TASK_TIMER, 1003))
+
     fun cancelWake() = am.cancel(pi(Actions.WAKE_CHECK, 1001))
 
     fun cancelCheckIn() = am.cancel(pi(Actions.CHECKIN, 1002))

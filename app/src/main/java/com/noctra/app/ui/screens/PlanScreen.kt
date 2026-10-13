@@ -19,8 +19,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -29,6 +29,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,17 +52,21 @@ import com.noctra.app.ui.components.ConfirmDialog
 import com.noctra.app.ui.components.LightBackdrop
 import com.noctra.app.ui.components.NcCard
 import com.noctra.app.ui.components.NcProgress
+import com.noctra.app.ui.components.PauseReasonDialog
 import com.noctra.app.ui.components.Pill
 import com.noctra.app.ui.components.PrimaryButton
 import com.noctra.app.ui.components.ProgressDialog
 import com.noctra.app.ui.components.SecondaryButton
 import com.noctra.app.ui.components.StatTile
+import com.noctra.app.ui.components.softBlue
+import com.noctra.app.ui.components.softViolet
 import com.noctra.app.ui.components.SubjectChip
 import com.noctra.app.ui.components.Wordmark
 import com.noctra.app.ui.components.subjectColors
 import com.noctra.app.ui.components.subjectTint
 import com.noctra.app.ui.theme.NC
 import com.noctra.app.viewmodel.HomeViewModel
+import kotlinx.coroutines.delay
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -84,6 +90,15 @@ fun PlanScreen(
     val ui by vm.ui.collectAsStateWithLifecycle()
     var progressFor by remember { mutableStateOf<TaskEntity?>(null) }
     var completeFor by remember { mutableStateOf<TaskEntity?>(null) }
+    var pauseFor by remember { mutableStateOf<TaskEntity?>(null) }
+    val running = ui.current?.isRunning == true
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(running) {
+        while (running) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
     val session = ui.session
     val wakeAt = session?.wakeAt
 
@@ -105,9 +120,9 @@ fun PlanScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Surface(onClick = onProfile, shape = CircleShape, color = Color.White, modifier = Modifier.size(48.dp)) {
+                Surface(onClick = onProfile, shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(48.dp)) {
                     Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Filled.Person, contentDescription = "Profile and settings", tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
@@ -138,6 +153,9 @@ fun PlanScreen(
                     current,
                     ui.tally.completed,
                     ui.tally.planned,
+                    now = now,
+                    onStart = { vm.startTask(current.id) },
+                    onPause = { pauseFor = current },
                     onClick = { onEditTask(current.id) },
                     onProgress = { progressFor = current },
                     onDone = { completeFor = current }
@@ -168,7 +186,7 @@ fun PlanScreen(
 
             when {
                 wakeAt == null -> Unit
-                ui.breakSince != null -> NcCard(container = Color(0xFFE4F0FF)) {
+                ui.breakSince != null -> NcCard(container = softBlue()) {
                     Text("On a break since ${TimeUtil.clock(ui.breakSince!!)}", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "Accountability checks are held until you end the break.",
@@ -183,7 +201,7 @@ fun PlanScreen(
                     Spacer(Modifier.height(12.dp))
                     PrimaryButton("RESUME CHECK-INS", vm::resume, Modifier.fillMaxWidth())
                 }
-                else -> NcCard(container = Color(0xFFE9E4FF), onClick = onCheckIn) {
+                else -> NcCard(container = softViolet(), onClick = onCheckIn) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Filled.Shield, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
                         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
@@ -248,6 +266,9 @@ fun PlanScreen(
             progressFor = null
         }
     }
+    pauseFor?.let { t ->
+        PauseReasonDialog(t.title, { reason -> vm.pauseTask(t.id, reason); pauseFor = null }, { pauseFor = null })
+    }
     completeFor?.let { t ->
         ConfirmDialog(
             "Mark as completed?",
@@ -264,6 +285,9 @@ private fun CurrentTaskCard(
     task: TaskEntity,
     done: Int,
     planned: Int,
+    now: Long,
+    onStart: () -> Unit,
+    onPause: () -> Unit,
     onClick: () -> Unit,
     onProgress: () -> Unit,
     onDone: () -> Unit
@@ -296,6 +320,25 @@ private fun CurrentTaskCard(
                 NcProgress(task.progress / 100f, Modifier.weight(1f), track = Color.White.copy(alpha = 0.3f), fill = Color.White)
                 Text("  $done / $planned tasks", style = MaterialTheme.typography.labelMedium, color = Color.White)
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when {
+                        task.isRunning -> "Running ${TimeUtil.clockDuration(task.workedAt(now))}"
+                        task.pausedAt != null -> "Paused · worked ${TimeUtil.duration(task.workedMs / 60_000L)}"
+                        else -> "Timer not started"
+                    },
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White
+                )
+                TextButton(onClick = if (task.isRunning) onPause else onStart) {
+                    Text(
+                        if (task.isRunning) "PAUSE" else if (task.pausedAt != null) "RESUME" else "START",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onProgress) { Text("UPDATE PROGRESS", color = Color.White, fontWeight = FontWeight.Bold) }
                 TextButton(onClick = onDone) { Text("DONE", color = Color.White, fontWeight = FontWeight.Bold) }
@@ -326,7 +369,7 @@ private fun MiniTaskCard(task: TaskEntity, modifier: Modifier, onClick: () -> Un
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = onStart) { Text("START") }
+            TextButton(onClick = onStart) { Text(if (task.pausedAt != null) "RESUME" else "START") }
         }
     }
 }

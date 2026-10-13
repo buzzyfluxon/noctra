@@ -21,6 +21,9 @@ class AlarmReceiver : BroadcastReceiver() {
                         val title = ci.taskId?.let { app.repo.getTask(it)?.title }
                         Notifier.showCheckIn(app, ci.id, title, interval)
                     }
+                    Actions.TASK_TIMER -> app.repo.onTaskTimerFired()?.let { t ->
+                        Notifier.showTaskTimeUp(app, t.id, t.title, t.estimateMin, t.workedAt(System.currentTimeMillis()) / 60_000L)
+                    }
                     else -> Unit
                 }
             } finally {
@@ -35,6 +38,7 @@ class ActionReceiver : BroadcastReceiver() {
         val app = context.applicationContext as NoctraApp
         val pending = goAsync()
         val checkInId = intent.getLongExtra(Actions.EXTRA_CHECKIN_ID, 0)
+        val taskId = intent.getLongExtra(Actions.EXTRA_TASK_ID, 0)
         app.appScope.launch {
             try {
                 when (intent.action) {
@@ -45,6 +49,7 @@ class ActionReceiver : BroadcastReceiver() {
                     Actions.CHECKIN_BREAK ->
                         app.repo.respond(checkInId, CheckInInput(CheckInResponse.BREAK))
                     Actions.END_BREAK -> app.repo.endBreak()
+                    Actions.EXTEND_15 -> if (taskId > 0) app.repo.extendTask(taskId, 15)
                     else -> Unit
                 }
             } finally {

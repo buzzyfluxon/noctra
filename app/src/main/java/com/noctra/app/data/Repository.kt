@@ -3,6 +3,9 @@ package com.noctra.app.data
 import android.content.Context
 import com.noctra.app.notify.Notifier
 import com.noctra.app.notify.Scheduler
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -39,6 +42,10 @@ class NoctraRepository(
     private val taskDao = db.tasks()
     private val sessionDao = db.sessions()
     private val mutex = Mutex()
+    private val timeUpEvents = MutableSharedFlow<Long>(extraBufferCapacity = 4)
+
+    /** Emits a task id when that task's timer reaches its planned time. */
+    val timeUp: SharedFlow<Long> = timeUpEvents.asSharedFlow()
 
     fun tasks() = taskDao.observeAll()
     fun allSubtasks() = taskDao.observeAllSubtasks()
@@ -53,14 +60,108 @@ class NoctraRepository(
 
     suspend fun getTask(id: Long) = taskDao.get(id)
     suspend fun getSubtasks(taskId: Long) = taskDao.subtasksOnce(taskId)
+    suspend fun tasksSnapshot(): List<TaskEntity> = taskDao.allOnce()
+    suspend fun openSessionOnce(): DaySession? = sessionDao.getOpen()
+    suspend fun sessionLogs(sessionId: Long): List<ActivityLog> = sessionDao.getLogs(sessionId)
+
+    // ---------------------------------------------------------------- task timer
+
+    private fun remainingMs(t: TaskEntity, now: Long): Long = t.estimateMin * 60_000L - t.workedAt(now)
+
+    /** Keeps exactly one alarm: the moment the running task reaches its planned time. */
+    private suspend fun syncTimer() {
+        val now = System.currentTimeMillis()
+        val running = taskDao.running().firstOrNull()
+        val remaining = running?.let { remainingMs(it, now) } ?: 0L
+        if (running != null && remaining > 0) scheduler.scheduleTaskTimer(now + remaining) else scheduler.cancelTaskTimer()
+    }
+
+    /**
+     * Stops the clock on running tasks (those matching [filter]) and books the time worked as STUDY.
+     * Returns the updated session; the caller is responsible for saving it.
+     */
+    private suspend fun settleRunning(
+        s: DaySession?,
+        now: Long,
+        reason: PauseReason?,
+        keepPaused: Boolean = true,
+        filter: (TaskEntity) -> Boolean = { true }
+    ): DaySession? {
+        var session = s
+        for (t in taskDao.running()) {
+            if (!filter(t)) continue
+            val since = t.runningSince ?: continue
+            val sess = session
+            val wake = sess?.wakeAt
+            if (sess != null && wake != null) {
+                val from = maxOf(since, sess.accountedUntil ?: wake)
+                if (now - from >= 60_000L) {
+                    sessionDao.insertLog(
+                        ActivityLog(sessionId = sess.id, kind = ActivityKind.STUDY, taskId = t.id, startAt = from, endAt = now, note = "timer")
+                    )
+                    session = sess.copy(accountedUntil = now)
+                }
+            }
+            taskDao.update(
+                t.copy(
+                    workedMs = t.workedMs + (now - since).coerceAtLeast(0),
+                    runningSince = null,
+                    pausedAt = if (keepPaused) now else null,
+                    pauseReason = if (keepPaused) reason else null
+                )
+            )
+        }
+        return session
+    }
+
+    suspend fun pauseTask(id: Long, reason: PauseReason) = mutex.withLock {
+        val now = System.currentTimeMillis()
+        var s = settleRunning(sessionDao.getOpen(), now, reason) { it.id == id }
+        if (reason == PauseReason.BREAK && s != null && s.wakeAt != null) s = startBreakInternal(s, now)
+        if (s != null && s.wakeAt != null) sessionDao.update(s)
+        syncTimer()
+        Notifier.cancel(ctx, Notifier.TIMEUP_ID)
+    }
+
+    suspend fun extendTask(id: Long, minutes: Int) = mutex.withLock {
+        val t = taskDao.get(id) ?: return@withLock
+        taskDao.update(t.copy(estimateMin = t.estimateMin + minutes.coerceAtLeast(1)))
+        syncTimer()
+        Notifier.cancel(ctx, Notifier.TIMEUP_ID)
+    }
+
+    /** Called by the alarm. Returns the task if it really is out of time. */
+    suspend fun onTaskTimerFired(): TaskEntity? = mutex.withLock {
+        val now = System.currentTimeMillis()
+        val t = taskDao.running().firstOrNull() ?: return@withLock null
+        if (remainingMs(t, now) > 5_000L) {
+            syncTimer()
+            return@withLock null
+        }
+        timeUpEvents.tryEmit(t.id)
+        t
+    }
 
     private fun intervalMs(st: AppSettings) = st.intervalMin * 60_000L
 
     suspend fun saveTask(task: TaskEntity, subtasks: List<SubtaskEntity>): Long = mutex.withLock {
-        val normalized = if (task.status == TaskStatus.COMPLETED) {
-            task.copy(progress = 100, completedAt = task.completedAt ?: System.currentTimeMillis())
+        if (task.id != 0L && task.status == TaskStatus.COMPLETED) {
+            val s = settleRunning(sessionDao.getOpen(), System.currentTimeMillis(), null, keepPaused = false) { it.id == task.id }
+            if (s != null && s.wakeAt != null) sessionDao.update(s)
+        }
+        // The edit form holds an older copy of the task: never let it overwrite the live timer state.
+        val live = if (task.id != 0L) taskDao.get(task.id) else null
+        val base = if (live != null) {
+            task.copy(runningSince = live.runningSince, workedMs = live.workedMs, pausedAt = live.pausedAt, pauseReason = live.pauseReason)
+        } else task
+        val normalized = if (base.status == TaskStatus.COMPLETED) {
+            base.copy(
+                progress = 100,
+                completedAt = base.completedAt ?: System.currentTimeMillis(),
+                runningSince = null, pausedAt = null, pauseReason = null
+            )
         } else {
-            task.copy(completedAt = null)
+            base.copy(completedAt = null)
         }
         val id = if (task.id == 0L) {
             taskDao.insert(normalized.copy(sortOrder = taskDao.maxOrder() + 1))
@@ -75,6 +176,7 @@ class NoctraRepository(
             else taskDao.updateSubtask(s.copy(sortOrder = i))
         }
         if (normalized.status == TaskStatus.COMPLETED) clearCurrentIf(id)
+        syncTimer()
         id
     }
 
@@ -83,8 +185,11 @@ class NoctraRepository(
     }
 
     suspend fun deleteTask(id: Long) = mutex.withLock {
+        val s = settleRunning(sessionDao.getOpen(), System.currentTimeMillis(), null, keepPaused = false) { it.id == id }
+        if (s != null && s.wakeAt != null) sessionDao.update(s)
         taskDao.delete(id)
         clearCurrentIf(id)
+        syncTimer()
     }
 
     suspend fun swapOrder(a: TaskEntity, b: TaskEntity) = mutex.withLock {
@@ -93,38 +198,69 @@ class NoctraRepository(
     }
 
     suspend fun postpone(id: Long) = mutex.withLock {
+        val s = settleRunning(sessionDao.getOpen(), System.currentTimeMillis(), null, keepPaused = false) { it.id == id }
+        if (s != null && s.wakeAt != null) sessionDao.update(s)
         val t = taskDao.get(id) ?: return@withLock
         taskDao.update(
             t.copy(
                 planDate = TimeUtil.tomorrowStr(),
                 status = TaskStatus.POSTPONED,
                 postponeCount = t.postponeCount + 1,
-                completedAt = null
+                completedAt = null,
+                runningSince = null, pausedAt = null, pauseReason = null
             )
         )
         clearCurrentIf(id)
+        syncTimer()
     }
 
     suspend fun completeTask(id: Long) = mutex.withLock {
+        val s = settleRunning(sessionDao.getOpen(), System.currentTimeMillis(), null, keepPaused = false) { it.id == id }
+        if (s != null && s.wakeAt != null) sessionDao.update(s)
         val t = taskDao.get(id) ?: return@withLock
         markCompleted(t)
         clearCurrentIf(id)
+        syncTimer()
+        Notifier.cancel(ctx, Notifier.TIMEUP_ID)
     }
 
     suspend fun startTask(id: Long) = mutex.withLock {
+        val now = System.currentTimeMillis()
         val t = taskDao.get(id) ?: return@withLock
         val today = TimeUtil.todayStr()
+        // Only one task runs at a time: park any other running task.
+        var s = settleRunning(sessionDao.getOpen(), now, null) { it.id != id }
         if (t.status != TaskStatus.COMPLETED) {
+            // Resuming after a "distracted" pause: that gap was lost time.
+            val pausedAt = t.pausedAt
+            val wake = s?.wakeAt
+            if (s != null && wake != null && pausedAt != null && t.pauseReason == PauseReason.DISTRACTED) {
+                val from = maxOf(pausedAt, s.accountedUntil ?: wake)
+                if (now - from >= 60_000L) {
+                    sessionDao.insertLog(
+                        ActivityLog(sessionId = s.id, kind = ActivityKind.DISTRACTION, taskId = id, startAt = from, endAt = now, note = "paused: distracted")
+                    )
+                    s = s.copy(accountedUntil = now)
+                }
+            }
             taskDao.update(
                 t.copy(
                     status = TaskStatus.IN_PROGRESS,
                     completedAt = null,
-                    planDate = if (t.planDate > today) today else t.planDate
+                    planDate = if (t.planDate > today) today else t.planDate,
+                    runningSince = t.runningSince ?: now,
+                    pausedAt = null,
+                    pauseReason = null
                 )
             )
         }
-        val s = sessionDao.getOpen()
-        if (s != null && s.wakeAt != null) sessionDao.update(s.copy(currentTaskId = id))
+        if (s != null && s.wakeAt != null) {
+            // Starting work ends any break that is still open.
+            if (sessionDao.getOpenBreak(s.id) != null) s = endBreakInternal(s, now)
+            sessionDao.update(s.copy(currentTaskId = id))
+        }
+        syncTimer()
+        Notifier.cancel(ctx, Notifier.TIMEUP_ID)
     }
 
     suspend fun setProgress(id: Long, progress: Int, estimateMin: Int) = mutex.withLock {
@@ -140,7 +276,14 @@ class NoctraRepository(
     }
 
     private suspend fun markCompleted(t: TaskEntity) {
-        taskDao.update(t.copy(status = TaskStatus.COMPLETED, progress = 100, completedAt = System.currentTimeMillis()))
+        taskDao.update(
+            t.copy(
+                status = TaskStatus.COMPLETED,
+                progress = 100,
+                completedAt = System.currentTimeMillis(),
+                runningSince = null, pausedAt = null, pauseReason = null
+            )
+        )
     }
 
     private suspend fun clearCurrentIf(id: Long) {
@@ -191,17 +334,18 @@ class NoctraRepository(
         retry
     }
 
-    suspend fun confirmWake(): Boolean = mutex.withLock {
+    suspend fun confirmWake(wakeAtMs: Long? = null): Boolean = mutex.withLock {
         val now = System.currentTimeMillis()
+        val chosen = (wakeAtMs ?: now).coerceIn(now - 24 * 3_600_000L, now)
         val st = settings.current()
         val base = freshSession(now)
         if (base.wakeAt != null) return@withLock false
         val next = now + intervalMs(st)
         sessionDao.update(
             base.copy(
-                wakeAt = now,
+                wakeAt = chosen,
                 wakeRetryAt = null,
-                accountedUntil = now,
+                accountedUntil = chosen,
                 nextCheckInAt = next,
                 currentTaskId = pickCurrent()?.id,
                 paused = false
@@ -211,6 +355,15 @@ class NoctraRepository(
         scheduleDailyWake(st)
         Notifier.cancel(ctx, Notifier.WAKE_ID)
         true
+    }
+
+    suspend fun updateWakeTime(newWake: Long) = mutex.withLock {
+        val now = System.currentTimeMillis()
+        val s = sessionDao.getOpen() ?: return@withLock
+        if (s.wakeAt == null) return@withLock
+        val w = newWake.coerceIn(now - 24 * 3_600_000L, now)
+        val noLogs = sessionDao.getLogs(s.id).isEmpty()
+        sessionDao.update(s.copy(wakeAt = w, accountedUntil = if (noLogs) w else s.accountedUntil))
     }
 
     suspend fun onCheckInFired(): CheckIn? = mutex.withLock {
@@ -254,10 +407,13 @@ class NoctraRepository(
 
     private suspend fun startBreakInternal(s: DaySession, now: Long): DaySession {
         if (sessionDao.getOpenBreak(s.id) != null) return s
-        sessionDao.insertLog(ActivityLog(sessionId = s.id, kind = ActivityKind.BREAK, startAt = now))
+        // A running task timer must not keep counting during a break.
+        val settled = settleRunning(s, now, PauseReason.BREAK) ?: s
+        syncTimer()
+        sessionDao.insertLog(ActivityLog(sessionId = settled.id, kind = ActivityKind.BREAK, startAt = now))
         scheduler.cancelCheckIn()
         Notifier.showBreak(ctx, now)
-        return s.copy(nextCheckInAt = null)
+        return settled.copy(nextCheckInAt = null)
     }
 
     suspend fun respond(checkInId: Long, input: CheckInInput): CheckInOutcome = mutex.withLock {
@@ -324,16 +480,20 @@ class NoctraRepository(
         sessionDao.update(startBreakInternal(s, System.currentTimeMillis()))
     }
 
-    suspend fun endBreak() = mutex.withLock {
-        val now = System.currentTimeMillis()
+    private suspend fun endBreakInternal(s: DaySession, now: Long): DaySession {
+        val b = sessionDao.getOpenBreak(s.id) ?: return s
         val st = settings.current()
-        val s = sessionDao.getOpen() ?: return@withLock
-        val b = sessionDao.getOpenBreak(s.id) ?: return@withLock
         sessionDao.updateLog(b.copy(endAt = now))
         val next = if (s.paused) null else now + intervalMs(st)
-        sessionDao.update(s.copy(accountedUntil = maxOf(s.accountedUntil ?: now, now), nextCheckInAt = next))
         if (next != null) scheduler.scheduleCheckIn(next)
         Notifier.cancel(ctx, Notifier.BREAK_ID)
+        return s.copy(accountedUntil = maxOf(s.accountedUntil ?: now, now), nextCheckInAt = next)
+    }
+
+    suspend fun endBreak() = mutex.withLock {
+        val s = sessionDao.getOpen() ?: return@withLock
+        if (sessionDao.getOpenBreak(s.id) == null) return@withLock
+        sessionDao.update(endBreakInternal(s, System.currentTimeMillis()))
     }
 
     suspend fun pause() = mutex.withLock {
@@ -361,6 +521,7 @@ class NoctraRepository(
         val now = System.currentTimeMillis()
         var s = sessionDao.get(sessionId) ?: return@withLock
         if (s.endedAt != null) return@withLock
+        s = settleRunning(s, now, null) ?: s
         val b = sessionDao.getOpenBreak(s.id)
         if (b != null) sessionDao.updateLog(b.copy(endAt = now))
         s = s.copy(endedAt = now, nextCheckInAt = null)
@@ -368,6 +529,8 @@ class NoctraRepository(
         scheduler.cancelCheckIn()
         Notifier.cancel(ctx, Notifier.CHECKIN_ID)
         Notifier.cancel(ctx, Notifier.BREAK_ID)
+        Notifier.cancel(ctx, Notifier.TIMEUP_ID)
+        syncTimer()
         buildReport(s)
     }
 
@@ -446,6 +609,7 @@ class NoctraRepository(
                 scheduler.scheduleCheckIn(at)
             }
         }
+        syncTimer()
     }
 
     suspend fun setWakeTime(hour: Int, minute: Int) {

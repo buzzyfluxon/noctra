@@ -2,14 +2,17 @@ package com.noctra.app.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -23,6 +26,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -34,6 +40,8 @@ import com.noctra.app.NoctraApp
 import com.noctra.app.data.AppSettings
 import com.noctra.app.ui.screens.CheckInScreen
 import com.noctra.app.ui.screens.InsightsScreen
+import com.noctra.app.ui.screens.NocScreen
+import com.noctra.app.ui.screens.TimeUpScreen
 import com.noctra.app.ui.screens.OnboardingScreen
 import com.noctra.app.ui.screens.PlanScreen
 import com.noctra.app.ui.screens.ReportScreen
@@ -49,14 +57,17 @@ object Routes {
     const val PLAN = "plan"
     const val TASKS = "tasks"
     const val INSIGHTS = "insights"
+    const val NOC = "noc"
     const val PROFILE = "profile"
     const val WAKE = "wake"
     const val TASK_EDIT = "task_edit/{taskId}"
     const val CHECKIN = "checkin/{checkInId}"
     const val REPORT = "report/{sessionId}"
+    const val TIMEUP = "timeup/{taskId}"
     fun taskEdit(id: Long = 0) = "task_edit/$id"
     fun checkIn(id: Long = 0) = "checkin/$id"
     fun report(id: Long) = "report/$id"
+    fun timeUp(id: Long) = "timeup/$id"
 }
 
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
@@ -64,8 +75,9 @@ private data class Tab(val route: String, val label: String, val icon: ImageVect
 private val tabs = listOf(
     Tab(Routes.PLAN, "Plan", Icons.Filled.Home),
     Tab(Routes.TASKS, "Tasks", Icons.Filled.TaskAlt),
+    Tab(Routes.NOC, "Noc", Icons.Filled.AutoAwesome),
     Tab(Routes.INSIGHTS, "Insights", Icons.Filled.BarChart),
-    Tab(Routes.PROFILE, "Profile", Icons.Filled.Person)
+    Tab(Routes.PROFILE, "Settings", Icons.Filled.Settings)
 )
 
 @Composable
@@ -91,12 +103,21 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
         }
     }
 
+    // When a running task hits its planned time while the app is open, ask right away.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(settings.onboarded) {
+        if (!settings.onboarded) return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            app.repo.timeUp.collect { id -> nav.navigate(Routes.timeUp(id)) { launchSingleTop = true } }
+        }
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             if (tabs.any { it.route == current }) {
-                NavigationBar(containerColor = Color.White) {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                     tabs.forEach { tab ->
                         NavigationBarItem(
                             selected = current == tab.route,
@@ -110,11 +131,11 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
                             icon = { Icon(tab.icon, null) },
                             label = { Text(tab.label) },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = NC.Violet,
-                                selectedTextColor = NC.Violet,
-                                indicatorColor = NC.VioletTint,
-                                unselectedIconColor = NC.Muted,
-                                unselectedTextColor = NC.Muted
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         )
                     }
@@ -122,7 +143,7 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
             }
         }
     ) { padding ->
-        NavHost(nav, startDestination = start, modifier = Modifier.padding(padding)) {
+        NavHost(nav, startDestination = start, modifier = Modifier.padding(padding).consumeWindowInsets(padding)) {
             composable(Routes.ONBOARD) {
                 OnboardingScreen(onFinished = {
                     nav.navigate(Routes.PLAN) { popUpTo(Routes.ONBOARD) { inclusive = true } }
@@ -141,6 +162,7 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
             composable(Routes.TASKS) {
                 TasksScreen(onAdd = { nav.navigate(Routes.taskEdit()) }, onEdit = { nav.navigate(Routes.taskEdit(it)) })
             }
+            composable(Routes.NOC) { NocScreen() }
             composable(Routes.INSIGHTS) {
                 InsightsScreen(onOpenReport = { nav.navigate(Routes.report(it)) })
             }
@@ -165,6 +187,12 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
                         nav.navigate(Routes.taskEdit(id))
                     }
                 )
+            }
+            composable(
+                Routes.TIMEUP,
+                arguments = listOf(navArgument("taskId") { type = NavType.LongType })
+            ) {
+                TimeUpScreen(onClose = { nav.popBackStack() })
             }
             composable(
                 Routes.REPORT,

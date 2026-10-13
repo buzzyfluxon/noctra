@@ -109,7 +109,7 @@ fun OnboardingScreen(onFinished: () -> Unit, vm: SettingsViewModel = viewModel()
                                 ctx.startActivity(Perms.batterySettings())
                             }
                             Text(
-                                "You can skip these and change them later in Profile. Reminders may then be late or missing.",
+                                "You can skip these and change them later in Settings. Reminders may then be late or missing.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

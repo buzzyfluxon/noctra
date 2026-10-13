@@ -14,8 +14,8 @@ Expect to fix a few compile errors on first build. Send me the error output and 
 5. APK later: Build > Build APK(s). Output: app/build/outputs/apk/debug/app-debug.apk.
 
 ## Screens
-Onboarding with permissions, Wake-up confirmation, Plan (home), Tasks, Add/Edit task, Hourly check-in, Daily report (review, correct, finalize), Insights and history, Profile/Settings.
-Not in this milestone: AI coach chat, AI planning, AI review. No AI buttons exist yet.
+Onboarding with permissions, Wake-up confirmation, Plan (home), Tasks, Add/Edit task, Hourly check-in, Daily report (review, correct, finalize), Insights and history, Settings.
+Noc (AI coach) chat tab: talks to Google Gemini with your own API key, can add, start, complete and postpone tasks, and logs lost time when you tell it you messed up. See "Noc" below.
 
 ## Notification behavior
 - Wake alarm at the configured time (default 10:00). Actions: YES, I'M UP and NOT YET (asks again in 15 min).
@@ -25,8 +25,18 @@ Not in this milestone: AI coach chat, AI planning, AI review. No AI buttons exis
 - Unanswered check-ins stay recorded as unanswered. They are never turned into distraction.
 - Alarms are rescheduled after reboot, app update, and time or timezone change.
 
+## Task timer
+START on a task begins its timer and the button becomes PAUSE. Pausing asks why (taking a break, got distracted, stuck, something else):
+- Taking a break starts a break (check-ins held), same as the check-in screen.
+- Got distracted counts the time until you resume as distraction.
+- Worked time is booked as study automatically, without double counting check-in minutes.
+Only one task runs at a time; starting another parks the first. When a running task reaches its planned time (for example 2h) the app asks automatically: a notification (+15 MIN or ANSWER IN APP) and, if the app is open, the "Time's up" screen: done, need more time (+15/+30/+60) or pause with a reason.
+
+## Noc (AI coach)
+Add a Gemini API key in the Noc tab or in Settings (free key: aistudio.google.com/apikey). Model defaults to `gemini-flash-latest` and can be changed in Settings. The key is stored on the device in its own DataStore file, excluded from Android backups, and sent only to Google in a request header. Chat messages and your task list are sent to Google when you talk to Noc. Chat history is kept in memory only. Tone (Brutal, Direct, Calm) in Settings changes how Noc talks.
+
 ## Time accounting
-No timers. Study, distraction and break minutes are what you enter (verified, user-entered). Break start and end are timestamps. Unclassified = elapsed since wake minus the rest. Subject progress on Insights is labeled ESTIMATE.
+Study, distraction and break minutes come from your check-in entries plus the task timer. Break start and end are timestamps. Unclassified = elapsed since wake minus the rest. Subject progress on Insights is labeled ESTIMATE.
 
 ## Known limits (be honest about these)
 - Exact alarms need the "Alarms and reminders" permission on Android 12+. Without it, Android may delay reminders.
@@ -34,7 +44,7 @@ No timers. Study, distraction and break minutes are what you enter (verified, us
 - Charts are simple Compose bars, not a chart library.
 - Separate break table was merged into activity logs (kind = BREAK). Daily plan is derived from task plan dates.
 - Export is CSV text via the share sheet.
-- Database schema v1. Room schemas are exported to app/schemas for future migrations.
+- Database schema v2 (task timer columns, migration 1 to 2 included). Room schemas are exported to app/schemas.
 
 ## Layout
 app/src/main/java/com/noctra/app

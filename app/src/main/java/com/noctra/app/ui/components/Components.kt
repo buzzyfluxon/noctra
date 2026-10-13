@@ -50,9 +50,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.view.WindowCompat
+import com.noctra.app.data.PauseReason
 import com.noctra.app.data.Subject
 import com.noctra.app.data.TaskEntity
 import com.noctra.app.data.TimeUtil
+import com.noctra.app.ui.theme.LocalIsDark
 import com.noctra.app.ui.theme.NC
 import com.noctra.app.ui.theme.NoctraTheme
 
@@ -71,12 +73,17 @@ fun StatusIcons(lightBackground: Boolean) {
 
 @Composable
 fun LightBackdrop(content: @Composable BoxScope.() -> Unit) {
-    StatusIcons(true)
-    CompositionLocalProvider(LocalContentColor provides NC.Slate) {
+    val dark = LocalIsDark.current
+    StatusIcons(!dark)
+    CompositionLocalProvider(LocalContentColor provides (if (dark) Color.White else NC.Slate)) {
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(Color(0xFFE3DCFF), NC.Canvas, NC.Canvas))),
+                .background(
+                    Brush.verticalGradient(
+                        if (dark) listOf(NC.InkMid, NC.Ink, NC.Ink) else listOf(Color(0xFFE3DCFF), NC.Canvas, NC.Canvas)
+                    )
+                ),
             content = content
         )
     }
@@ -243,12 +250,22 @@ fun subjectColors(s: Subject): Pair<Color, Color> = when (s) {
     Subject.CUSTOM -> Color(0xFFFFEBC2) to Color(0xFF8A5A00)
 }
 
-fun subjectTint(s: Subject): Color = when (s) {
-    Subject.PHYSICS -> Color(0xFFEAE6FF)
-    Subject.CHEMISTRY -> Color(0xFFFFEDE8)
-    Subject.BIOLOGY -> Color(0xFFE3F7F1)
-    Subject.CUSTOM -> Color(0xFFFFF4DB)
+@Composable
+fun subjectTint(s: Subject): Color {
+    val dark = LocalIsDark.current
+    return when (s) {
+        Subject.PHYSICS -> if (dark) Color(0xFF2B2560) else Color(0xFFEAE6FF)
+        Subject.CHEMISTRY -> if (dark) Color(0xFF3D2331) else Color(0xFFFFEDE8)
+        Subject.BIOLOGY -> if (dark) Color(0xFF1D3A36) else Color(0xFFE3F7F1)
+        Subject.CUSTOM -> if (dark) Color(0xFF3D3420) else Color(0xFFFFF4DB)
+    }
 }
+
+@Composable
+fun softBlue(): Color = if (LocalIsDark.current) Color(0xFF1E3350) else Color(0xFFE4F0FF)
+
+@Composable
+fun softViolet(): Color = if (LocalIsDark.current) Color(0xFF2E2766) else Color(0xFFE9E4FF)
 
 @Composable
 fun SubjectChip(task: TaskEntity, modifier: Modifier = Modifier) {
@@ -360,4 +377,26 @@ fun MiniBars(
             }
         }
     }
+}
+
+@Composable
+fun PauseReasonDialog(taskTitle: String, onPick: (PauseReason) -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Why are you pausing?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "\"$taskTitle\"",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                PauseReason.entries.forEach { r ->
+                    SecondaryButton(r.label.uppercase(), { onPick(r) }, Modifier.fillMaxWidth())
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } }
+    )
 }

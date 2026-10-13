@@ -2,6 +2,7 @@ package com.noctra.app
 
 import android.app.Application
 import com.noctra.app.data.AppDatabase
+import com.noctra.app.data.NocStore
 import com.noctra.app.data.NoctraRepository
 import com.noctra.app.data.SettingsStore
 import com.noctra.app.notify.Notifier
@@ -16,6 +17,8 @@ class NoctraApp : Application() {
 
     lateinit var repo: NoctraRepository
         private set
+
+    val nocStore: NocStore by lazy { NocStore(this) }
 
     override fun onCreate() {
         super.onCreate()
