@@ -6,15 +6,22 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -65,51 +72,91 @@ object Gemini {
 
     class ApiException(message: String) : Exception(message)
 
+    /** A failure worth trying again (dropped connection, overloaded server). */
+    private class TransientException(message: String) : Exception(message)
+
+    private const val MAX_ATTEMPTS = 3
+    private val RETRY_DELAYS_MS = longArrayOf(800L, 2_000L)
+
     suspend fun generate(
         apiKey: String,
         model: String,
         system: String,
         contents: List<JSONObject>,
         tools: JSONArray
-    ): JSONObject = withContext(Dispatchers.IO) {
+    ): JSONObject {
         val m = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
         if (!Regex("[A-Za-z0-9._-]+").matches(m)) throw ApiException("The model name looks invalid. Check it in Settings.")
         val body = JSONObject()
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
             .put("contents", JSONArray(contents))
             .put("tools", tools)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        var last = "Couldn't reach Gemini. Check your internet connection."
+        for (attempt in 0 until MAX_ATTEMPTS) {
+            if (attempt > 0) delay(RETRY_DELAYS_MS[attempt - 1])
+            try {
+                return post(apiKey, m, body)
+            } catch (e: TransientException) {
+                last = e.message ?: last
+            }
+        }
+        throw ApiException(last)
+    }
+
+    private suspend fun post(apiKey: String, m: String, body: ByteArray): JSONObject = withContext(Dispatchers.IO) {
         val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent")
             .openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 60_000
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 90_000
+            conn.useCaches = false
             conn.doOutput = true
+            conn.setFixedLengthStreamingMode(body.size)
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("x-goog-api-key", apiKey)
-            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            // A pooled connection that the server already closed is the usual cause of failures on the 2nd or 3rd message.
+            conn.setRequestProperty("Connection", "close")
+            conn.outputStream.use { it.write(body) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code !in 200..299) throw ApiException(friendlyError(code, text, m))
-            val json = JSONObject(text)
+            if (code !in 200..299) {
+                val msg = friendlyError(code, text, m)
+                if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) throw TransientException(msg)
+                throw ApiException(msg)
+            }
+            val json = try {
+                JSONObject(text)
+            } catch (_: JSONException) {
+                throw TransientException("Gemini sent back something unreadable. Try again.")
+            }
             val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
             val content = candidate?.optJSONObject("content")
             if (content == null || content.optJSONArray("parts") == null) {
                 val reason = candidate?.optString("finishReason").orEmpty()
                     .ifBlank { json.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty() }
-                throw ApiException(
-                    if (reason.isBlank()) "Gemini sent back an empty answer. Try again."
-                    else "Gemini did not answer ($reason). Try rephrasing."
-                )
+                if (reason.isBlank()) throw TransientException("Gemini sent back an empty answer. Try again.")
+                throw ApiException("Gemini did not answer ($reason). Try rephrasing.")
             }
             if (!content.has("role")) content.put("role", "model")
             content
         } catch (e: IOException) {
-            throw ApiException("Couldn't reach Gemini. Check your internet connection.")
+            throw TransientException(describeIo(e))
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun describeIo(e: IOException): String = when (e) {
+        is UnknownHostException, is ConnectException, is NoRouteToHostException ->
+            "Couldn't reach Gemini. Check your internet connection."
+        is SocketTimeoutException -> "Gemini took too long to answer. Try again."
+        is SSLException ->
+            "Secure connection to Gemini failed (${e.message ?: "TLS error"}). Check the phone's date and time, or turn off any VPN."
+        else -> "The connection to Gemini dropped (${e.javaClass.simpleName}${e.message?.let { ": $it" } ?: ""}). Try again."
     }
 
     private fun friendlyError(code: Int, body: String, model: String): String {
@@ -179,6 +226,51 @@ private val NOC_TOOLS: JSONArray = JSONArray().put(
             .put(fn("start_task", "Start the timer on a task.", obj("task_id" to prop("INTEGER", "Task id from list_tasks.")), listOf("task_id")))
             .put(
                 fn(
+                    "edit_task",
+                    "Change fields of an existing task. Only pass the fields that should change.",
+                    obj(
+                        "task_id" to prop("INTEGER", "Task id from list_tasks."),
+                        "title" to prop("STRING", "New title."),
+                        "subject" to prop("STRING", "Physics, Chemistry, Biology, or any other subject name."),
+                        "topic" to prop("STRING", "New chapter or topic."),
+                        "estimate_minutes" to prop("INTEGER", "New planned minutes."),
+                        "priority" to prop("STRING", "LOW, MEDIUM or HIGH."),
+                        "plan_date" to prop("STRING", "today, tomorrow, or a date as YYYY-MM-DD."),
+                        "deadline" to prop("STRING", "Deadline as YYYY-MM-DD, or none to remove it."),
+                        "notes" to prop("STRING", "New notes (replaces the old notes)."),
+                        "progress_percent" to prop("INTEGER", "Progress from 0 to 100."),
+                        "add_subtasks" to obj(
+                            "type" to "ARRAY",
+                            "description" to "Checklist items to add.",
+                            "items" to obj("type" to "STRING")
+                        )
+                    ),
+                    listOf("task_id")
+                )
+            )
+            .put(
+                fn(
+                    "delete_task",
+                    "Permanently delete a task and its checklist. Only when the user clearly asks to delete or remove it.",
+                    obj("task_id" to prop("INTEGER", "Task id from list_tasks.")),
+                    listOf("task_id")
+                )
+            )
+            .put(
+                fn(
+                    "log_study",
+                    "Record study time the user already did, today or on a past day (for example 'I studied 3 hours yesterday').",
+                    obj(
+                        "minutes" to prop("INTEGER", "Minutes studied."),
+                        "subject" to prop("STRING", "Physics, Chemistry, Biology, or any other subject name. Default General."),
+                        "date" to prop("STRING", "today, yesterday, or YYYY-MM-DD. Default today."),
+                        "note" to prop("STRING", "Optional note.")
+                    ),
+                    listOf("minutes")
+                )
+            )
+            .put(
+                fn(
                     "log_distraction",
                     "Record time the user wasted or got distracted. Use when they admit they messed up and give an amount of time.",
                     obj(
@@ -197,12 +289,44 @@ class NocAgent(private val repo: NoctraRepository) {
     fun reset() = history.clear()
 
     /**
+     * Rebuilds the model's memory from saved chat lines (user text and Noc replies only).
+     * Consecutive lines from the same side are merged so the turns alternate.
+     */
+    fun restore(lines: List<Pair<Boolean, String>>) {
+        history.clear()
+        var lastUser: Boolean? = null
+        for ((isUser, text) in lines) {
+            if (text.isBlank()) continue
+            if (history.isEmpty() && !isUser) continue
+            if (lastUser == isUser) {
+                val parts = history.last().getJSONArray("parts")
+                val prev = parts.getJSONObject(0)
+                prev.put("text", prev.optString("text") + "\n" + text)
+            } else {
+                history.add(
+                    JSONObject().put("role", if (isUser) "user" else "model")
+                        .put("parts", JSONArray().put(JSONObject().put("text", text)))
+                )
+                lastUser = isUser
+            }
+        }
+        // A trailing user turn is a message that never got an answer; the next message starts fresh.
+        if (lastUser == true && history.isNotEmpty()) history.removeAt(history.size - 1)
+        trimHistory()
+    }
+
+    /**
      * Sends one user message, runs any tool calls Gemini asks for, and returns Noc's final text.
      * [onAction] is called with a short line for each change made to the app.
      */
     suspend fun chat(userText: String, cfg: NocConfig, tone: String, onAction: (String) -> Unit): String {
         trimHistory()
         val mark = history.size
+        val done = mutableListOf<String>()
+        val track: (String) -> Unit = { line ->
+            done.add(line)
+            onAction(line)
+        }
         history.add(
             JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", userText)))
         )
@@ -224,7 +348,7 @@ class NocAgent(private val repo: NoctraRepository) {
                 val replies = JSONArray()
                 for (call in calls) {
                     val name = call.optString("name")
-                    val result = runTool(name, call.optJSONObject("args") ?: JSONObject(), onAction)
+                    val result = runTool(name, call.optJSONObject("args") ?: JSONObject(), track)
                     replies.put(
                         JSONObject().put(
                             "functionResponse",
@@ -238,6 +362,16 @@ class NocAgent(private val repo: NoctraRepository) {
         } catch (e: Throwable) {
             // Never leave a half-finished turn behind: a dangling tool call makes every later request fail.
             if (history.size > mark) history.subList(mark, history.size).clear()
+            if (done.isNotEmpty() && e !is CancellationException) {
+                // Changes were already made: remember them so the next message doesn't redo them.
+                history.add(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", userText))))
+                history.add(
+                    JSONObject().put("role", "model").put(
+                        "parts",
+                        JSONArray().put(JSONObject().put("text", "Done in the app: ${done.joinToString("; ")}. (My reply was lost.)"))
+                    )
+                )
+            }
             throw e
         }
     }
@@ -278,6 +412,13 @@ class NocAgent(private val repo: NoctraRepository) {
                 onAction("Started: ${t.title}")
                 ok("task_id" to t.id)
             }
+            "edit_task" -> editTask(args, onAction)
+            "delete_task" -> withTask(args) { t ->
+                repo.deleteTask(t.id)
+                onAction("Deleted: ${t.title}")
+                ok("task_id" to t.id)
+            }
+            "log_study" -> logStudy(args, onAction)
             "log_distraction" -> logDistraction(args, onAction)
             else -> err("Unknown tool: $name")
         }
@@ -293,22 +434,86 @@ class NocAgent(private val repo: NoctraRepository) {
         return if (t == null) err("No task with id $id. Call list_tasks to see valid ids.") else block(t)
     }
 
+    private fun resolveSubject(raw: String): Pair<Subject, String> {
+        val builtIn = Subject.entries.firstOrNull { it != Subject.CUSTOM && it.label.equals(raw, ignoreCase = true) }
+        return if (builtIn != null) builtIn to "" else Subject.CUSTOM to raw.ifBlank { "General" }
+    }
+
+    /** today / tomorrow / yesterday / YYYY-MM-DD (blank means today). Null when it can't be read. */
+    private fun resolvePlanDate(raw: String): String? = when {
+        raw.isBlank() || raw.equals("today", true) -> TimeUtil.todayStr()
+        raw.equals("tomorrow", true) -> TimeUtil.tomorrowStr()
+        raw.equals("yesterday", true) -> LocalDate.now().minusDays(1).toString()
+        else -> runCatching { LocalDate.parse(raw).toString() }.getOrNull()
+    }
+
+    private suspend fun editTask(args: JSONObject, onAction: (String) -> Unit): JSONObject = withTask(args) { t ->
+        var n = t
+        if (args.has("title")) {
+            val v = args.optString("title").trim()
+            if (v.isBlank()) return@withTask err("title can't be empty")
+            n = n.copy(title = v)
+        }
+        if (args.has("subject") && args.optString("subject").isNotBlank()) {
+            val (subject, custom) = resolveSubject(args.optString("subject").trim())
+            n = n.copy(subject = subject, customSubject = custom)
+        }
+        if (args.has("topic")) n = n.copy(topic = args.optString("topic").trim())
+        if (args.has("notes")) n = n.copy(notes = args.optString("notes").trim())
+        if (args.has("estimate_minutes")) n = n.copy(estimateMin = args.optInt("estimate_minutes", n.estimateMin).coerceIn(5, 600))
+        if (args.has("priority") && args.optString("priority").isNotBlank()) {
+            val p = Priority.entries.firstOrNull { it.name.equals(args.optString("priority").trim(), ignoreCase = true) }
+                ?: return@withTask err("priority must be LOW, MEDIUM or HIGH")
+            n = n.copy(priority = p)
+        }
+        if (args.has("plan_date") && args.optString("plan_date").isNotBlank()) {
+            val d = resolvePlanDate(args.optString("plan_date").trim())
+                ?: return@withTask err("plan_date must be today, tomorrow or YYYY-MM-DD")
+            n = n.copy(planDate = d)
+        }
+        if (args.has("deadline")) {
+            val raw = args.optString("deadline").trim()
+            n = if (raw.isBlank() || raw.equals("none", true)) n.copy(deadlineEpochDay = null) else {
+                val day = runCatching { LocalDate.parse(raw).toEpochDay() }.getOrNull()
+                    ?: return@withTask err("deadline must be YYYY-MM-DD or none")
+                n.copy(deadlineEpochDay = day)
+            }
+        }
+        if (args.has("progress_percent") && n.status != TaskStatus.COMPLETED) {
+            val p = args.optInt("progress_percent", n.progress).coerceIn(0, 100)
+            val status = if (p > 0 && n.status != TaskStatus.IN_PROGRESS) TaskStatus.IN_PROGRESS else n.status
+            n = n.copy(progress = p, status = status)
+        }
+        val existing = repo.getSubtasks(t.id)
+        val extra = args.optJSONArray("add_subtasks")?.let { arr ->
+            (0 until arr.length()).map { arr.optString(it).trim() }.filter { it.isNotBlank() }
+        }.orEmpty().mapIndexed { i, title -> SubtaskEntity(title = title, sortOrder = existing.size + i) }
+        if (n == t && extra.isEmpty()) return@withTask err("Nothing to change. Pass at least one field to edit.")
+        repo.saveTask(n, existing + extra)
+        onAction("Edited: ${n.title}")
+        ok("task_id" to t.id)
+    }
+
+    private suspend fun logStudy(args: JSONObject, onAction: (String) -> Unit): JSONObject {
+        val minutes = args.optInt("minutes", 0)
+        if (minutes <= 0) return err("minutes must be greater than 0")
+        val date = resolvePlanDate(args.optString("date").trim())
+            ?: return err("date must be today, yesterday or YYYY-MM-DD")
+        val subject = args.optString("subject").trim().ifBlank { "General" }
+        val done = repo.logStudy(LocalDate.parse(date), minutes, subject, args.optString("note"))
+        if (!done) return err("That date is in the future, so study can't be logged for it.")
+        onAction("Logged ${TimeUtil.duration(minutes.toLong())} of $subject study ($date)")
+        return ok("minutes" to minutes, "date" to date)
+    }
+
     private suspend fun addTask(args: JSONObject, onAction: (String) -> Unit): JSONObject {
         val title = args.optString("title").trim()
         if (title.isBlank()) return err("title is required")
-        val subjectRaw = args.optString("subject").trim()
-        val builtIn = Subject.entries.firstOrNull { it != Subject.CUSTOM && it.label.equals(subjectRaw, ignoreCase = true) }
-        val subject = builtIn ?: Subject.CUSTOM
-        val custom = if (builtIn != null) "" else subjectRaw.ifBlank { "General" }
+        val (subject, custom) = resolveSubject(args.optString("subject").trim())
         val priority = Priority.entries.firstOrNull { it.name.equals(args.optString("priority").trim(), ignoreCase = true) }
             ?: Priority.MEDIUM
-        val planRaw = args.optString("plan_date").trim()
-        val planDate = when {
-            planRaw.isBlank() || planRaw.equals("today", true) -> TimeUtil.todayStr()
-            planRaw.equals("tomorrow", true) -> TimeUtil.tomorrowStr()
-            else -> runCatching { LocalDate.parse(planRaw).toString() }.getOrNull()
-                ?: return err("plan_date must be today, tomorrow or YYYY-MM-DD")
-        }
+        val planDate = resolvePlanDate(args.optString("plan_date").trim())
+            ?: return err("plan_date must be today, tomorrow or YYYY-MM-DD")
         val deadlineRaw = args.optString("deadline").trim()
         val deadline = if (deadlineRaw.isBlank()) null else
             runCatching { LocalDate.parse(deadlineRaw).toEpochDay() }.getOrNull()
@@ -387,9 +592,12 @@ class NocAgent(private val repo: NoctraRepository) {
             Rules:
             - Keep replies short: this is a phone chat. Plain text only. No markdown, no asterisks, no headings.
             - Reply in the language the user writes in.
-            - You can change the app with tools: add_task, list_tasks, complete_task, postpone_task, start_task, log_distraction.
+            - You can change the app with tools: add_task, list_tasks, edit_task, delete_task, complete_task, postpone_task, start_task,
+              log_study, log_distraction.
               Use them when the user asks for something that matches. Call list_tasks first if you need a task id you don't have.
               Only say something was done after the tool result says ok.
+            - Delete a task only when the user clearly asks to delete or remove it. If it is unclear which task they mean, ask.
+            - When the user says they studied for some time (today or on a past day), record it with log_study.
             - When the user says they messed up (wasted time, skipped work, got distracted): react in your tone in one or two
               sentences, log the lost minutes with log_distraction if they tell you how long, then offer a realistic recovery
               plan for the rest of the day. Offer to postpone what no longer fits. Do not pile on.

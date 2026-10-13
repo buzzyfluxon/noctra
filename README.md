@@ -15,7 +15,8 @@ Expect to fix a few compile errors on first build. Send me the error output and 
 
 ## Screens
 Onboarding with permissions, Wake-up confirmation, Plan (home), Tasks, Add/Edit task, Hourly check-in, Daily report (review, correct, finalize), Insights and history, Settings.
-Noc (AI coach) chat tab: talks to Google Gemini with your own API key, can add, start, complete and postpone tasks, and logs lost time when you tell it you messed up. See "Noc" below.
+Noc (AI coach) chat tab: talks to Google Gemini with your own API key, can add, edit, delete, start, complete and postpone tasks, logs study you already did, and logs lost time when you tell it you messed up. See "Noc" below.
+Insights has LOG PAST STUDY: add study hours for any past day (date, hours/minutes, subject, note) and delete them again.
 
 ## Notification behavior
 - Wake alarm at the configured time (default 10:00). Actions: YES, I'M UP and NOT YET (asks again in 15 min).
@@ -33,7 +34,13 @@ START on a task begins its timer and the button becomes PAUSE. Pausing asks why 
 Only one task runs at a time; starting another parks the first. When a running task reaches its planned time (for example 2h) the app asks automatically: a notification (+15 MIN or ANSWER IN APP) and, if the app is open, the "Time's up" screen: done, need more time (+15/+30/+60) or pause with a reason.
 
 ## Noc (AI coach)
-Add a Gemini API key in the Noc tab or in Settings (free key: aistudio.google.com/apikey). Model defaults to `gemini-flash-latest` and can be changed in Settings. The key is stored on the device in its own DataStore file, excluded from Android backups, and sent only to Google in a request header. Chat messages and your task list are sent to Google when you talk to Noc. Chat history is kept in memory only. Tone (Brutal, Direct, Calm) in Settings changes how Noc talks.
+Add a Gemini API key in the Noc tab or in Settings (free key: aistudio.google.com/apikey). Model defaults to `gemini-flash-latest` and can be changed in Settings. The key is stored on the device in its own DataStore file, excluded from Android backups, and sent only to Google in a request header. Chat messages and your task list are sent to Google when you talk to Noc. The chat is saved on the phone (last 500 lines, Room table `noc_messages`) and comes back after restarting the app; the trash icon clears it. Failed requests are retried automatically (3 tries) and a TRY AGAIN button appears if they still fail and nothing had been changed yet. Tone (Brutal, Direct, Calm) in Settings changes how Noc talks.
+
+## Backup and restore
+Settings > Backup and restore: BACK UP NOW saves a JSON file (tasks, subtasks, days, logs, check-ins, reports, Noc chat) anywhere you pick, e.g. Drive. RESTORE FROM BACKUP replaces everything in the app with that file. App settings and the Gemini key are not included.
+
+## Logging past study
+Entries for past days go into a small closed day record of their own, so that day's real wake/break numbers are not touched. They count in the Insights charts, subject totals and CSV export (column `subject`). An entry for today, while you are awake, is added to today's numbers. Noc can do the same ("I studied 3 hours of physics yesterday"). Max 16 hours per entry, no future dates.
 
 ## Time accounting
 Study, distraction and break minutes come from your check-in entries plus the task timer. Break start and end are timestamps. Unclassified = elapsed since wake minus the rest. Subject progress on Insights is labeled ESTIMATE.
@@ -44,7 +51,7 @@ Study, distraction and break minutes come from your check-in entries plus the ta
 - Charts are simple Compose bars, not a chart library.
 - Separate break table was merged into activity logs (kind = BREAK). Daily plan is derived from task plan dates.
 - Export is CSV text via the share sheet.
-- Database schema v2 (task timer columns, migration 1 to 2 included). Room schemas are exported to app/schemas.
+- Database schema v3 (v2: task timer columns; v3: `activity_logs.subject` and the `noc_messages` table; migrations 1 to 2 and 2 to 3 included). Room schemas are exported to app/schemas.
 
 ## Layout
 app/src/main/java/com/noctra/app

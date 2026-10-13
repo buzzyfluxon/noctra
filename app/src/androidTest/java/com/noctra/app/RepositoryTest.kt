@@ -102,4 +102,34 @@ class RepositoryTest {
         assertEquals(1, t.postponeCount)
         assertEquals(TimeUtil.tomorrowStr(), t.planDate)
     }
+
+    @Test
+    fun pastStudyIsLoggedOnItsOwnDayAndCanBeDeleted() = runBlocking {
+        val day = java.time.LocalDate.now().minusDays(3)
+        assertTrue(repo.logStudy(day, 150, "physics", "mechanics"))
+        assertTrue(repo.logStudy(day, 30, "Chemistry"))
+        val logs = repo.manualStudy().first()
+        assertEquals(2, logs.size)
+        assertEquals(180L, logs.sumOf { (it.endAt!! - it.startAt) / 60_000L })
+        assertTrue(logs.all { TimeUtil.dateOf(it.startAt) == day })
+        assertTrue(logs.any { it.subject == "Physics" })
+        repo.deleteManualStudy(logs.first().id)
+        assertEquals(1, repo.manualStudy().first().size)
+        assertNull(repo.openSessionOnce())
+    }
+
+    @Test
+    fun futureStudyIsRejected() = runBlocking {
+        assertFalse(repo.logStudy(java.time.LocalDate.now().plusDays(1), 60, "Physics"))
+        assertTrue(repo.manualStudy().first().isEmpty())
+    }
+
+    @Test
+    fun nocChatHistoryIsSavedInOrderAndCleared() = runBlocking {
+        repo.saveNocMessage("USER", "hi")
+        repo.saveNocMessage("NOC", "hello")
+        assertEquals(listOf("hi", "hello"), repo.nocMessages().map { it.text })
+        repo.clearNocMessages()
+        assertTrue(repo.nocMessages().isEmpty())
+    }
 }

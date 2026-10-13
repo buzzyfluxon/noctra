@@ -17,7 +17,17 @@ object Migrations {
         }
     }
 
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2)
+    val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE activity_logs ADD COLUMN subject TEXT NOT NULL DEFAULT ''")
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `noc_messages` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`role` TEXT NOT NULL, `text` TEXT NOT NULL, `createdAt` INTEGER NOT NULL)"
+            )
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 }
 
 @Database(
@@ -27,14 +37,16 @@ object Migrations {
         DaySession::class,
         ActivityLog::class,
         CheckIn::class,
-        DailyReport::class
+        DailyReport::class,
+        NocMessageEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun tasks(): TaskDao
     abstract fun sessions(): SessionDao
+    abstract fun noc(): NocDao
 
     companion object {
         fun build(context: Context): AppDatabase =

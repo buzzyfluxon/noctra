@@ -3,11 +3,13 @@ package com.noctra.app.data
 import android.content.Context
 import com.noctra.app.notify.Notifier
 import com.noctra.app.notify.Scheduler
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.LocalDate
 
 data class CheckInInput(
     val response: CheckInResponse,
@@ -35,12 +37,13 @@ data class CheckInContext(
 
 class NoctraRepository(
     private val ctx: Context,
-    db: AppDatabase,
+    private val db: AppDatabase,
     val settings: SettingsStore,
     private val scheduler: Scheduler
 ) {
     private val taskDao = db.tasks()
     private val sessionDao = db.sessions()
+    private val nocDao = db.noc()
     private val mutex = Mutex()
     private val timeUpEvents = MutableSharedFlow<Long>(extraBufferCapacity = 4)
 
@@ -57,6 +60,8 @@ class NoctraRepository(
     fun checkIns(sessionId: Long) = sessionDao.observeCheckIns(sessionId)
     fun allCheckIns() = sessionDao.observeAllCheckIns()
     fun reports() = sessionDao.observeReports()
+
+    fun manualStudy() = sessionDao.observeManualStudy()
 
     suspend fun getTask(id: Long) = taskDao.get(id)
     suspend fun getSubtasks(taskId: Long) = taskDao.subtasksOnce(taskId)
@@ -589,6 +594,104 @@ class NoctraRepository(
         refreshReport(sessionId)
     }
 
+    /**
+     * Logs study time for a day that was not tracked live (or extra time for today).
+     * Past days get a small closed "manual" session of their own, so their real day accounting is never disturbed.
+     * Returns false when the date is in the future or the amount is not usable.
+     */
+    suspend fun logStudy(date: LocalDate, minutes: Int, subject: String, note: String = ""): Boolean = mutex.withLock {
+        if (minutes <= 0 || date.isAfter(LocalDate.now())) return@withLock false
+        val m = minutes.coerceAtMost(MAX_MANUAL_STUDY_MIN)
+        val dayStart = TimeUtil.startOfDay(date.toString())
+        val open = sessionDao.getOpen()
+        val wake = open?.wakeAt
+        val sessionId: Long
+        val start: Long
+        if (date.toString() == TimeUtil.todayStr() && open != null && wake != null) {
+            // Today and already awake: count it in today's numbers.
+            sessionId = open.id
+            start = maxOf(wake, dayStart + 60_000L)
+        } else {
+            val existing = sessionDao.getManualSession(date.toString())
+            sessionId = existing?.id
+                ?: sessionDao.insert(DaySession(date = date.toString(), endedAt = dayStart + 60_000L))
+            start = dayStart + 60_000L
+        }
+        val label = subject.trim().ifBlank { "General" }
+        val canonical = Subject.entries.firstOrNull { it != Subject.CUSTOM && it.label.equals(label, ignoreCase = true) }?.label
+            ?: label
+        val cleanNote = note.trim()
+        sessionDao.insertLog(
+            ActivityLog(
+                sessionId = sessionId,
+                kind = ActivityKind.STUDY,
+                startAt = start,
+                endAt = start + m * 60_000L,
+                note = if (cleanNote.isEmpty()) "manual study" else "manual study: $cleanNote",
+                subject = canonical
+            )
+        )
+        true
+    }
+
+    suspend fun deleteManualStudy(logId: Long) = mutex.withLock {
+        val log = sessionDao.getLog(logId) ?: return@withLock
+        if (log.note.startsWith("manual study")) sessionDao.deleteLog(logId)
+    }
+
+    // ---------------------------------------------------------------- Noc chat history
+
+    suspend fun nocMessages(): List<NocMessageEntity> = nocDao.all()
+
+    suspend fun saveNocMessage(role: String, text: String): Long {
+        val id = nocDao.insert(NocMessageEntity(role = role, text = text))
+        nocDao.trim(MAX_SAVED_CHAT)
+        return id
+    }
+
+    suspend fun clearNocMessages() = nocDao.clear()
+
+    // ---------------------------------------------------------------- backup
+
+    suspend fun exportBackup(): String = mutex.withLock {
+        Backup.toJson(
+            BackupData(
+                tasks = taskDao.allOnce(),
+                subtasks = taskDao.allSubtasksOnce(),
+                sessions = sessionDao.allSessionsOnce(),
+                logs = sessionDao.allLogsOnce(),
+                checkIns = sessionDao.allCheckInsOnce(),
+                reports = sessionDao.allReportsOnce(),
+                chat = nocDao.all()
+            )
+        )
+    }
+
+    /** Replaces everything in the app with the backup. Throws IllegalArgumentException for a bad file. */
+    suspend fun restoreBackup(text: String) {
+        val d = Backup.parse(text)
+        mutex.withLock {
+            db.withTransaction {
+                sessionDao.deleteAllReports()
+                sessionDao.deleteAllCheckIns()
+                sessionDao.deleteAllLogs()
+                sessionDao.deleteAllSessions()
+                taskDao.deleteAllSubtasks()
+                taskDao.deleteAllTasks()
+                nocDao.clear()
+                d.tasks.forEach { taskDao.insert(it) }
+                d.subtasks.forEach { taskDao.insertSubtask(it) }
+                d.sessions.forEach { sessionDao.insert(it) }
+                d.logs.forEach { sessionDao.insertLog(it) }
+                d.checkIns.forEach { sessionDao.insertCheckIn(it) }
+                d.reports.forEach { sessionDao.insertReport(it) }
+                d.chat.forEach { nocDao.insert(it) }
+            }
+        }
+        // Alarms and the task timer follow the restored data.
+        rescheduleAll()
+    }
+
     suspend fun rescheduleAll() = mutex.withLock {
         val now = System.currentTimeMillis()
         val st = settings.current()
@@ -646,9 +749,9 @@ class NoctraRepository(
         }
         sb.appendLine()
         sb.appendLine("ACTIVITY")
-        sb.appendLine("id,sessionId,kind,taskId,startAt,endAt,verified,note")
+        sb.appendLine("id,sessionId,kind,taskId,startAt,endAt,verified,note,subject")
         sessionDao.allLogsOnce().forEach {
-            sb.appendLine("${it.id},${it.sessionId},${it.kind},${it.taskId ?: ""},${it.startAt},${it.endAt ?: ""},${it.verified},${q(it.note)}")
+            sb.appendLine("${it.id},${it.sessionId},${it.kind},${it.taskId ?: ""},${it.startAt},${it.endAt ?: ""},${it.verified},${q(it.note)},${q(it.subject)}")
         }
         sb.appendLine()
         sb.appendLine("CHECKINS")
@@ -657,5 +760,10 @@ class NoctraRepository(
             sb.appendLine("${it.id},${it.sessionId},${it.taskId ?: ""},${it.scheduledAt},${it.respondedAt ?: ""},${it.response ?: ""},${it.studiedMin},${it.wastedMin},${q(it.note)}")
         }
         return sb.toString()
+    }
+
+    private companion object {
+        const val MAX_MANUAL_STUDY_MIN = 16 * 60
+        const val MAX_SAVED_CHAT = 500
     }
 }

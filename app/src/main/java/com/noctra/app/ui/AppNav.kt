@@ -112,6 +112,15 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
         }
     }
 
+    // One way to switch tabs, used by the bar and by shortcuts, so the saved back stack never gets out of sync.
+    fun goTab(route: String) {
+        nav.navigate(route) {
+            popUpTo(Routes.PLAN) { saveState = route != Routes.PLAN }
+            launchSingleTop = true
+            restoreState = route != Routes.PLAN
+        }
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -121,13 +130,7 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
                     tabs.forEach { tab ->
                         NavigationBarItem(
                             selected = current == tab.route,
-                            onClick = {
-                                nav.navigate(tab.route) {
-                                    popUpTo(Routes.PLAN) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
+                            onClick = { goTab(tab.route) },
                             icon = { Icon(tab.icon, null) },
                             label = { Text(tab.label) },
                             colors = NavigationBarItemDefaults.colors(
@@ -156,7 +159,7 @@ fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
                     onEditTask = { nav.navigate(Routes.taskEdit(it)) },
                     onCheckIn = { nav.navigate(Routes.checkIn()) },
                     onEndDay = { nav.navigate(Routes.report(it)) },
-                    onProfile = { nav.navigate(Routes.PROFILE) { launchSingleTop = true } }
+                    onProfile = { goTab(Routes.PROFILE) }
                 )
             }
             composable(Routes.TASKS) {

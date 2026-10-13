@@ -1,6 +1,7 @@
 package com.noctra.app.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -29,7 +30,11 @@ import com.noctra.app.data.TaskEntity
 import com.noctra.app.data.TaskStatus
 import com.noctra.app.data.TaskTally
 import com.noctra.app.data.TimeUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -258,6 +263,22 @@ class InsightsViewModel(app: Application) : AndroidViewModel(app) {
         compute(logs, tasks, checkIns, sessions, reports)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), InsightsUi())
 
+    /** Study entered by hand for days that were not tracked live, newest first. */
+    val manualStudy: StateFlow<List<ActivityLog>> = repo.manualStudy()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val customSubjects: StateFlow<List<String>> = repo.settings.flow
+        .map { it.customSubjects }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun logStudy(date: LocalDate, minutes: Int, subject: String, note: String) {
+        viewModelScope.launch { repo.logStudy(date, minutes, subject, note) }
+    }
+
+    fun deleteManualStudy(id: Long) {
+        viewModelScope.launch { repo.deleteManualStudy(id) }
+    }
+
     private fun compute(
         logs: List<ActivityLog>,
         tasks: List<TaskEntity>,
@@ -276,8 +297,8 @@ class InsightsViewModel(app: Application) : AndroidViewModel(app) {
             DayBar(d.dayOfWeek.name.take(3).lowercase().replaceFirstChar { it.uppercase() }, sum(ActivityKind.STUDY), sum(ActivityKind.BREAK), sum(ActivityKind.DISTRACTION))
         }
         val taskById = tasks.associateBy { it.id }
-        val subjectStudy = weekLogs.filter { it.kind == ActivityKind.STUDY && it.taskId != null }
-            .groupBy { taskById[it.taskId]?.subjectLabel ?: "Deleted task" }
+        val subjectStudy = weekLogs.filter { it.kind == ActivityKind.STUDY && (it.taskId != null || it.subject.isNotBlank()) }
+            .groupBy { log -> if (log.taskId != null) taskById[log.taskId]?.subjectLabel ?: "Deleted task" else log.subject }
             .map { (k, v) -> k to v.sumOf { Stats.minutes(it, now) } }
             .sortedByDescending { it.second }
         val weekTasks = tasks.filter { it.planDate >= from.toString() && it.planDate <= today.toString() }
@@ -385,6 +406,46 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun export(onReady: (String) -> Unit) {
         viewModelScope.launch { onReady(repo.exportCsv()) }
     }
+
+    fun backupTo(uri: Uri, done: (String) -> Unit) {
+        viewModelScope.launch {
+            val msg = try {
+                val json = repo.exportBackup()
+                withContext(Dispatchers.IO) {
+                    val out = getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                        ?: throw IOException("Couldn't open that file.")
+                    out.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                }
+                "Backup saved."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                "Backup failed: ${e.message ?: e.javaClass.simpleName}"
+            }
+            done(msg)
+        }
+    }
+
+    fun restoreFrom(uri: Uri, done: (String) -> Unit) {
+        viewModelScope.launch {
+            val msg = try {
+                val text = withContext(Dispatchers.IO) {
+                    val input = getApplication<Application>().contentResolver.openInputStream(uri)
+                        ?: throw IOException("Couldn't open that file.")
+                    input.use { it.readBytes().toString(Charsets.UTF_8) }
+                }
+                repo.restoreBackup(text)
+                "Backup restored."
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: IllegalArgumentException) {
+                e.message ?: "That file isn't a Noctra backup."
+            } catch (e: Exception) {
+                "Restore failed: ${e.message ?: e.javaClass.simpleName}"
+            }
+            done(msg)
+        }
+    }
 }
 
 enum class NocRole { USER, NOC, ACTION, ERROR }
@@ -393,8 +454,13 @@ data class NocMessage(val id: Long, val role: NocRole, val text: String)
 
 class NocViewModel(app: Application) : AndroidViewModel(app) {
     private val nocApp = app as NoctraApp
-    private val agent = NocAgent(nocApp.repo)
+    private val repo = nocApp.repo
+    private val agent = NocAgent(repo)
     private var nextId = 1L
+    private var lastUserText: String? = null
+
+    // Chat lines are saved in order through one queue ("" role = clear everything).
+    private val saveQueue = Channel<Pair<String, String>>(Channel.UNLIMITED)
 
     val config: StateFlow<NocConfig> = nocApp.nocStore.flow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NocConfig())
@@ -404,30 +470,95 @@ class NocViewModel(app: Application) : AndroidViewModel(app) {
     var sending by mutableStateOf(false)
         private set
 
+    /** True while the last send failed before anything was changed, so sending it again is safe. */
+    var canRetry by mutableStateOf(false)
+        private set
+    var loaded by mutableStateOf(false)
+        private set
+
+    init {
+        viewModelScope.launch {
+            for ((role, text) in saveQueue) {
+                try {
+                    if (role.isEmpty()) repo.clearNocMessages() else repo.saveNocMessage(role, text)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // History is a convenience: a failed save must never break the chat.
+                }
+            }
+        }
+        viewModelScope.launch {
+            val saved = try {
+                repo.nocMessages()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                emptyList()
+            }
+            messages = saved.mapNotNull { m ->
+                NocRole.entries.firstOrNull { it.name == m.role }?.takeIf { it != NocRole.ERROR }
+                    ?.let { NocMessage(nextId++, it, m.text) }
+            }
+            agent.restore(
+                saved.filter { it.role == NocRole.USER.name || it.role == NocRole.NOC.name }
+                    .map { (it.role == NocRole.USER.name) to it.text }
+            )
+            loaded = true
+        }
+    }
+
     private fun add(role: NocRole, text: String) {
         messages = messages + NocMessage(nextId++, role, text)
+        if (role != NocRole.ERROR) saveQueue.trySend(role.name to text)
     }
 
     fun send(text: String) {
         val t = text.trim()
-        if (t.isEmpty() || sending) return
+        if (t.isEmpty() || sending || !loaded) return
         add(NocRole.USER, t)
+        run(t)
+    }
+
+    fun retry() {
+        val t = lastUserText ?: return
+        if (sending || !canRetry) return
+        if (messages.lastOrNull()?.role == NocRole.ERROR) messages = messages.dropLast(1)
+        run(t)
+    }
+
+    private fun run(t: String) {
+        lastUserText = t
+        canRetry = false
         sending = true
         viewModelScope.launch {
+            var changes = 0
             try {
                 val cfg = nocApp.nocStore.current()
-                val tone = nocApp.repo.settings.current().tone
-                val reply = agent.chat(t, cfg, tone) { add(NocRole.ACTION, it) }
+                val tone = repo.settings.current().tone
+                val reply = agent.chat(t, cfg, tone) {
+                    changes++
+                    add(NocRole.ACTION, it)
+                }
                 add(NocRole.NOC, reply)
             } catch (e: Gemini.ApiException) {
-                add(NocRole.ERROR, e.message ?: "Something went wrong.")
+                fail(e.message ?: "Something went wrong.", changes)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                add(NocRole.ERROR, "Something went wrong: ${e.message ?: "unknown error"}")
+                fail("Something went wrong: ${e.message ?: e.javaClass.simpleName}", changes)
             } finally {
                 sending = false
             }
+        }
+    }
+
+    private fun fail(message: String, changes: Int) {
+        if (changes > 0) {
+            add(NocRole.ERROR, "$message The changes above were saved, so don't resend the same request. Ask what's left.")
+        } else {
+            add(NocRole.ERROR, message)
+            canRetry = true
         }
     }
 
@@ -435,6 +566,9 @@ class NocViewModel(app: Application) : AndroidViewModel(app) {
         if (sending) return
         agent.reset()
         messages = emptyList()
+        canRetry = false
+        lastUserText = null
+        saveQueue.trySend("" to "")
     }
 
     fun saveKey(key: String) = viewModelScope.launch { nocApp.nocStore.setKey(key) }

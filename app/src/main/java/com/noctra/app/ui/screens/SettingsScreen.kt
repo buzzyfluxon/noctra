@@ -3,6 +3,9 @@ package com.noctra.app.ui.screens
 import android.app.TimePickerDialog
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.noctra.app.ui.components.ConfirmDialog
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -74,6 +77,24 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { perms = Perms.read(ctx) }
     val askNotifications = rememberNotificationAsk { perms = Perms.read(ctx) }
+
+    var backupMsg by remember { mutableStateOf<String?>(null) }
+    var restoreUri by remember { mutableStateOf<Uri?>(null) }
+    val saveBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) vm.backupTo(uri) { backupMsg = it }
+    }
+    val pickBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) restoreUri = uri
+    }
+    restoreUri?.let { uri ->
+        ConfirmDialog(
+            "Restore this backup?",
+            "Everything currently in the app (tasks, logs, reports, chat) will be replaced by the backup.",
+            "RESTORE",
+            { restoreUri = null; vm.restoreFrom(uri) { backupMsg = it } },
+            { restoreUri = null }
+        )
+    }
 
     LightBackdrop {
         Column(
@@ -240,6 +261,27 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                         ctx.startActivity(Intent.createChooser(send, "Export data"))
                     }
                 }, Modifier.fillMaxWidth())
+            }
+
+            NcCard {
+                Text("Backup and restore", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Save all your tasks, study logs, reports and Noc chat to a file (keep it in Drive or send it to yourself). " +
+                        "Restoring replaces everything currently in the app. Settings and your Gemini key are not included.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                PrimaryButton("BACK UP NOW", {
+                    backupMsg = null
+                    saveBackup.launch("noctra-backup-${TimeUtil.todayStr()}.json")
+                }, Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                SecondaryButton("RESTORE FROM BACKUP", { backupMsg = null; pickBackup.launch(arrayOf("*/*")) }, Modifier.fillMaxWidth())
+                backupMsg?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                }
             }
 
             NcCard {

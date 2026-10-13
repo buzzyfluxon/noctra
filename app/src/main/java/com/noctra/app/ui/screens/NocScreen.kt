@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.noctra.app.data.Gemini
 import com.noctra.app.data.NocConfig
+import com.noctra.app.ui.components.ConfirmDialog
 import com.noctra.app.ui.components.LightBackdrop
 import com.noctra.app.ui.components.NcCard
 import com.noctra.app.ui.components.PrimaryButton
@@ -69,12 +70,23 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
     val cfg by vm.config.collectAsStateWithLifecycle()
     val messages = vm.messages
     var input by remember { mutableStateOf("") }
+    var confirmClear by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size, vm.sending) {
         val extra = if (vm.sending) 1 else 0
         val count = messages.size + extra
         if (count > 0) listState.animateScrollToItem(count - 1)
+    }
+
+    if (confirmClear) {
+        ConfirmDialog(
+            "Clear chat history?",
+            "This deletes the saved conversation with Noc. Your tasks and logs are not touched.",
+            "CLEAR",
+            { confirmClear = false; vm.clear() },
+            { confirmClear = false }
+        )
     }
 
     LightBackdrop {
@@ -92,7 +104,7 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
                     )
                 }
                 if (messages.isNotEmpty()) {
-                    IconButton(onClick = vm::clear, enabled = !vm.sending) { Icon(Icons.Filled.Delete, "Clear chat") }
+                    IconButton(onClick = { confirmClear = true }, enabled = !vm.sending) { Icon(Icons.Filled.Delete, "Clear chat") }
                 }
             }
 
@@ -123,7 +135,7 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
                             NcCard {
                                 Text("Talk to Noc", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    "Noc sees your tasks and today's numbers. It can add tasks, start, complete or postpone them, and log lost time. Tell it when you mess up.",
+                                    "Noc sees your tasks and today's numbers. It can add, edit, delete, start, complete or postpone tasks, log study you already did, and log lost time. Tell it when you mess up. Your chat is saved on this phone.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -133,7 +145,14 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
                             SecondaryButton(s, { vm.send(s) }, Modifier.fillMaxWidth())
                         }
                     }
-                    items(messages, key = { it.id }) { Bubble(it) }
+                    items(messages, key = { it.id }) { m ->
+                        Column {
+                            Bubble(m)
+                            if (vm.canRetry && !vm.sending && m.role == NocRole.ERROR && m.id == messages.last().id) {
+                                TextButton(onClick = vm::retry) { Text("TRY AGAIN") }
+                            }
+                        }
+                    }
                     if (vm.sending) {
                         item { Bubble(NocMessage(-1, NocRole.NOC, "Noc is thinking…")) }
                     }
@@ -153,7 +172,7 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
                     )
                     IconButton(
                         onClick = { vm.send(input); input = "" },
-                        enabled = input.isNotBlank() && !vm.sending
+                        enabled = input.isNotBlank() && !vm.sending && vm.loaded
                     ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
                 }
             }

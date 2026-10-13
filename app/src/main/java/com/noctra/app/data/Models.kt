@@ -119,7 +119,9 @@ data class ActivityLog(
     val startAt: Long,
     val endAt: Long? = null,
     val verified: Boolean = true,
-    val note: String = ""
+    val note: String = "",
+    /** Subject label for entries that are not tied to a task (manually logged study). */
+    val subject: String = ""
 )
 
 @Entity(
@@ -162,4 +164,13 @@ data class DailyReport(
     val checkInsAnswered: Int,
     val checkInsUnanswered: Int,
     val generatedAt: Long
+)
+
+/** One saved line of the Noc chat (user text, Noc reply, action line or error). */
+@Entity(tableName = "noc_messages")
+data class NocMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val role: String,
+    val text: String,
+    val createdAt: Long = System.currentTimeMillis()
 )

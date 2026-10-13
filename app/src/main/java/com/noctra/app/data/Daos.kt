@@ -50,6 +50,15 @@ interface TaskDao {
 
     @Query("DELETE FROM subtasks WHERE id = :id")
     suspend fun deleteSubtask(id: Long)
+
+    @Query("SELECT * FROM subtasks ORDER BY id")
+    suspend fun allSubtasksOnce(): List<SubtaskEntity>
+
+    @Query("DELETE FROM subtasks")
+    suspend fun deleteAllSubtasks()
+
+    @Query("DELETE FROM tasks")
+    suspend fun deleteAllTasks()
 }
 
 @Dao
@@ -96,6 +105,12 @@ interface SessionDao {
     @Insert
     suspend fun insertLog(log: ActivityLog): Long
 
+    @Query("SELECT * FROM sessions WHERE date = :date AND wakeAt IS NULL AND wakeCheckSentAt IS NULL AND endedAt IS NOT NULL ORDER BY id LIMIT 1")
+    suspend fun getManualSession(date: String): DaySession?
+
+    @Query("SELECT * FROM activity_logs WHERE note LIKE 'manual study%' ORDER BY startAt DESC")
+    fun observeManualStudy(): Flow<List<ActivityLog>>
+
     @Update
     suspend fun updateLog(log: ActivityLog)
 
@@ -128,4 +143,41 @@ interface SessionDao {
 
     @Query("SELECT * FROM reports ORDER BY endedAt DESC")
     fun observeReports(): Flow<List<DailyReport>>
+
+    @Query("SELECT * FROM reports ORDER BY id")
+    suspend fun allReportsOnce(): List<DailyReport>
+
+    @Query("SELECT * FROM sessions ORDER BY id")
+    suspend fun allSessionsOnce(): List<DaySession>
+
+    @Query("DELETE FROM reports")
+    suspend fun deleteAllReports()
+
+    @Query("DELETE FROM checkins")
+    suspend fun deleteAllCheckIns()
+
+    @Query("DELETE FROM activity_logs")
+    suspend fun deleteAllLogs()
+
+    @Query("DELETE FROM sessions")
+    suspend fun deleteAllSessions()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReport(report: DailyReport): Long
+}
+
+@Dao
+interface NocDao {
+    @Query("SELECT * FROM noc_messages ORDER BY id")
+    suspend fun all(): List<NocMessageEntity>
+
+    @Insert
+    suspend fun insert(m: NocMessageEntity): Long
+
+    @Query("DELETE FROM noc_messages")
+    suspend fun clear()
+
+    /** Keeps the table from growing forever: drops everything but the newest [keep] rows. */
+    @Query("DELETE FROM noc_messages WHERE id NOT IN (SELECT id FROM noc_messages ORDER BY id DESC LIMIT :keep)")
+    suspend fun trim(keep: Int)
 }
