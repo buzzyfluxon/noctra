@@ -75,8 +75,12 @@ object Gemini {
     /** A failure worth trying again (dropped connection, overloaded server). */
     private class TransientException(message: String) : Exception(message)
 
-    private const val MAX_ATTEMPTS = 3
-    private val RETRY_DELAYS_MS = longArrayOf(800L, 2_000L)
+    private const val MAX_ATTEMPTS = 4
+    private val RETRY_DELAYS_MS = longArrayOf(600L, 1_500L, 3_000L)
+
+    /** Thinking makes Flash models slow and the chat feels stuck, so it is turned off. Dropped automatically if the model rejects it. */
+    @Volatile
+    private var thinkingOff = true
 
     suspend fun generate(
         apiKey: String,
@@ -87,15 +91,10 @@ object Gemini {
     ): JSONObject {
         val m = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
         if (!Regex("[A-Za-z0-9._-]+").matches(m)) throw ApiException("The model name looks invalid. Check it in Settings.")
-        val body = JSONObject()
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
-            .put("contents", JSONArray(contents))
-            .put("tools", tools)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
         var last = "Couldn't reach Gemini. Check your internet connection."
         for (attempt in 0 until MAX_ATTEMPTS) {
             if (attempt > 0) delay(RETRY_DELAYS_MS[attempt - 1])
+            val body = buildBody(system, contents, tools)
             try {
                 return post(apiKey, m, body)
             } catch (e: TransientException) {
@@ -105,8 +104,23 @@ object Gemini {
         throw ApiException(last)
     }
 
+    private fun buildBody(system: String, contents: List<JSONObject>, tools: JSONArray): ByteArray {
+        val o = JSONObject()
+            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+            .put("contents", JSONArray(contents))
+            .put("tools", tools)
+        if (thinkingOff) {
+            o.put("generationConfig", JSONObject().put("thinkingConfig", JSONObject().put("thinkingBudget", 0)))
+        }
+        return o.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    /**
+     * Streams the answer (server-sent events). Bytes keep arriving while Gemini works, so mobile networks and
+     * proxies don't cut a long silent connection ("connection abort"). Nothing is returned until the stream is complete.
+     */
     private suspend fun post(apiKey: String, m: String, body: ByteArray): JSONObject = withContext(Dispatchers.IO) {
-        val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent")
+        val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:streamGenerateContent?alt=sse")
             .openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
@@ -116,33 +130,50 @@ object Gemini {
             conn.doOutput = true
             conn.setFixedLengthStreamingMode(body.size)
             conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Accept", "text/event-stream")
+            // No gzip: compressed streams are buffered and arrive in one late lump.
+            conn.setRequestProperty("Accept-Encoding", "identity")
             conn.setRequestProperty("x-goog-api-key", apiKey)
-            // A pooled connection that the server already closed is the usual cause of failures on the 2nd or 3rd message.
             conn.setRequestProperty("Connection", "close")
             conn.outputStream.use { it.write(body) }
             val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
             if (code !in 200..299) {
+                val text = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                if (code == 400 && thinkingOff && text.contains("thinking", ignoreCase = true)) {
+                    thinkingOff = false
+                    throw TransientException("Retrying without the thinking setting.")
+                }
                 val msg = friendlyError(code, text, m)
                 if (code == 429 || code == 500 || code == 502 || code == 503 || code == 504) throw TransientException(msg)
                 throw ApiException(msg)
             }
-            val json = try {
-                JSONObject(text)
-            } catch (_: JSONException) {
-                throw TransientException("Gemini sent back something unreadable. Try again.")
+            val parts = JSONArray()
+            var reason = ""
+            conn.inputStream.bufferedReader().use { r ->
+                while (true) {
+                    val line = r.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val payload = line.substring(5).trim()
+                    if (payload.isEmpty() || payload == "[DONE]") continue
+                    val json = try {
+                        JSONObject(payload)
+                    } catch (_: JSONException) {
+                        continue
+                    }
+                    val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
+                    val ps = candidate?.optJSONObject("content")?.optJSONArray("parts")
+                    if (ps != null) for (i in 0 until ps.length()) parts.put(ps.get(i))
+                    val fr = candidate?.optString("finishReason").orEmpty()
+                    if (fr.isNotBlank()) reason = fr
+                    val br = json.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty()
+                    if (br.isNotBlank() && reason.isBlank()) reason = br
+                }
             }
-            val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
-            val content = candidate?.optJSONObject("content")
-            if (content == null || content.optJSONArray("parts") == null) {
-                val reason = candidate?.optString("finishReason").orEmpty()
-                    .ifBlank { json.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty() }
-                if (reason.isBlank()) throw TransientException("Gemini sent back an empty answer. Try again.")
+            if (parts.length() == 0) {
+                if (reason.isBlank() || reason == "STOP") throw TransientException("Gemini sent back an empty answer. Try again.")
                 throw ApiException("Gemini did not answer ($reason). Try rephrasing.")
             }
-            if (!content.has("role")) content.put("role", "model")
-            content
+            JSONObject().put("role", "model").put("parts", parts)
         } catch (e: IOException) {
             throw TransientException(describeIo(e))
         } finally {
@@ -198,7 +229,7 @@ private val NOC_TOOLS: JSONArray = JSONArray().put(
                     "Add a task to the user's plan in the app.",
                     obj(
                         "title" to prop("STRING", "Short task title."),
-                        "subject" to prop("STRING", "Physics, Chemistry, Biology, or any other subject name."),
+                        "subject" to prop("STRING", "Physics, Chemistry, Botany, Zoology, or any other subject name."),
                         "topic" to prop("STRING", "Chapter or topic, optional."),
                         "estimate_minutes" to prop("INTEGER", "Planned minutes. Default 60."),
                         "priority" to prop("STRING", "LOW, MEDIUM or HIGH."),
@@ -231,7 +262,7 @@ private val NOC_TOOLS: JSONArray = JSONArray().put(
                     obj(
                         "task_id" to prop("INTEGER", "Task id from list_tasks."),
                         "title" to prop("STRING", "New title."),
-                        "subject" to prop("STRING", "Physics, Chemistry, Biology, or any other subject name."),
+                        "subject" to prop("STRING", "Physics, Chemistry, Botany, Zoology, or any other subject name."),
                         "topic" to prop("STRING", "New chapter or topic."),
                         "estimate_minutes" to prop("INTEGER", "New planned minutes."),
                         "priority" to prop("STRING", "LOW, MEDIUM or HIGH."),
@@ -262,7 +293,7 @@ private val NOC_TOOLS: JSONArray = JSONArray().put(
                     "Record study time the user already did, today or on a past day (for example 'I studied 3 hours yesterday').",
                     obj(
                         "minutes" to prop("INTEGER", "Minutes studied."),
-                        "subject" to prop("STRING", "Physics, Chemistry, Biology, or any other subject name. Default General."),
+                        "subject" to prop("STRING", "Physics, Chemistry, Botany, Zoology, or any other subject name. Default General."),
                         "date" to prop("STRING", "today, yesterday, or YYYY-MM-DD. Default today."),
                         "note" to prop("STRING", "Optional note.")
                     ),

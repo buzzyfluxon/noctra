@@ -244,6 +244,32 @@ fun PlanScreen(
                 )
             }
 
+            if (ui.loggedStudy.isNotEmpty()) {
+                NcCard {
+                    Text("Study you logged", style = MaterialTheme.typography.titleMedium)
+                    if (ui.stats == null && ui.extraStudyToday > 0) {
+                        Text(
+                            "Today so far: ${TimeUtil.duration(ui.extraStudyToday)}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    ui.loggedStudy.take(5).forEach { l ->
+                        val d = java.time.Instant.ofEpochMilli(l.startAt).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+                        val day = when (d) {
+                            LocalDate.now() -> "Today"
+                            LocalDate.now().minusDays(1) -> "Yesterday"
+                            else -> d.format(DateTimeFormatter.ofPattern("d MMM", Locale.getDefault()))
+                        }
+                        val mins = com.noctra.app.data.Stats.minutes(l, l.endAt ?: l.startAt)
+                        Text(
+                            "$day: ${l.subject.ifBlank { "General" }}, ${TimeUtil.duration(mins)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SecondaryButton("ADD TASK", onAddTask, Modifier.weight(1f))
                 if (session != null && wakeAt != null) {

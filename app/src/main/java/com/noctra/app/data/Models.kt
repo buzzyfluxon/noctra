@@ -8,7 +8,8 @@ import androidx.room.PrimaryKey
 enum class Subject(val label: String) {
     PHYSICS("Physics"),
     CHEMISTRY("Chemistry"),
-    BIOLOGY("Biology"),
+    BOTANY("Botany"),
+    ZOOLOGY("Zoology"),
     CUSTOM("Custom")
 }
 

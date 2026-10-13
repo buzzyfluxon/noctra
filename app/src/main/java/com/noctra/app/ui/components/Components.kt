@@ -246,7 +246,8 @@ fun EmptyState(title: String, body: String, modifier: Modifier = Modifier, actio
 fun subjectColors(s: Subject): Pair<Color, Color> = when (s) {
     Subject.PHYSICS -> Color(0xFFE0D9FF) to Color(0xFF4B36B8)
     Subject.CHEMISTRY -> Color(0xFFFFD9D6) to Color(0xFFB4235A)
-    Subject.BIOLOGY -> Color(0xFFCFF3E6) to Color(0xFF0B6B58)
+    Subject.BOTANY -> Color(0xFFD7F2C9) to Color(0xFF2F6B12)
+    Subject.ZOOLOGY -> Color(0xFFCFF3E6) to Color(0xFF0B6B58)
     Subject.CUSTOM -> Color(0xFFFFEBC2) to Color(0xFF8A5A00)
 }
 
@@ -256,7 +257,8 @@ fun subjectTint(s: Subject): Color {
     return when (s) {
         Subject.PHYSICS -> if (dark) Color(0xFF2B2560) else Color(0xFFEAE6FF)
         Subject.CHEMISTRY -> if (dark) Color(0xFF3D2331) else Color(0xFFFFEDE8)
-        Subject.BIOLOGY -> if (dark) Color(0xFF1D3A36) else Color(0xFFE3F7F1)
+        Subject.BOTANY -> if (dark) Color(0xFF243A1D) else Color(0xFFEBF8E3)
+        Subject.ZOOLOGY -> if (dark) Color(0xFF1D3A36) else Color(0xFFE3F7F1)
         Subject.CUSTOM -> if (dark) Color(0xFF3D3420) else Color(0xFFFFF4DB)
     }
 }

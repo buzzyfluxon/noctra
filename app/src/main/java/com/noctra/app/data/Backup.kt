@@ -114,7 +114,8 @@ object Backup {
                     TaskEntity(
                         id = o.getLong("id"), title = o.str("title"),
                         subject = o.enumOf<Subject>("subject") ?: Subject.CUSTOM,
-                        customSubject = o.str("customSubject"), topic = o.str("topic"),
+                        customSubject = o.str("customSubject").ifBlank { if (o.str("subject") == "BIOLOGY") "Biology" else "" },
+                        topic = o.str("topic"),
                         estimateMin = o.getInt("estimateMin"),
                         priority = o.enumOf<Priority>("priority") ?: Priority.MEDIUM,
                         deadlineEpochDay = o.long("deadlineEpochDay"), notes = o.str("notes"),

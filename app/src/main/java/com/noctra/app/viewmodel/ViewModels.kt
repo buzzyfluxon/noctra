@@ -67,6 +67,10 @@ data class HomeUi(
     val upcoming: List<TaskEntity> = emptyList(),
     val tally: TaskTally = TaskTally(0, 0),
     val stats: DayStats? = null,
+    /** Study logged by hand for today while no live day was open (not part of [stats]). */
+    val extraStudyToday: Long = 0,
+    /** Study entered by hand in the last 7 days, newest first. */
+    val loggedStudy: List<ActivityLog> = emptyList(),
     val breakSince: Long? = null
 )
 
@@ -76,9 +80,17 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private val sessionFlow = repo.openSession()
     private val logsFlow = sessionFlow.flatMapLatest { s -> if (s == null) flowOf(emptyList<ActivityLog>()) else repo.logs(s.id) }
 
+    private val logsAndManual = combine(logsFlow, repo.manualStudy()) { l, m -> l to m }
+
     val ui: StateFlow<HomeUi> = combine(
-        repo.settings.flow, repo.tasks(), sessionFlow, logsFlow, ticker(30_000)
-    ) { settings, tasks, session, logs, now ->
+        repo.settings.flow, repo.tasks(), sessionFlow, logsAndManual, ticker(30_000)
+    ) { settings, tasks, session, logPair, now ->
+        val (logs, manual) = logPair
+        val todayStart = TimeUtil.startOfDay(TimeUtil.todayStr())
+        val recent = manual.filter { it.startAt >= todayStart - 6 * 86_400_000L }
+        val extraToday = recent
+            .filter { it.startAt >= todayStart && it.sessionId != session?.id }
+            .sumOf { Stats.minutes(it, now) }
         val open = openToday(tasks)
         val current = session?.currentTaskId?.let { id -> open.firstOrNull { it.id == id } }
             ?: open.firstOrNull { it.status == TaskStatus.IN_PROGRESS }
@@ -90,7 +102,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             current = current,
             upcoming = open.filter { it.id != current?.id }.take(2),
             tally = Stats.tally(tasks, TimeUtil.todayStr(), since),
-            stats = session?.let { cur -> cur.wakeAt?.let { Stats.day(it, cur.endedAt, now, logs) } },
+            stats = session?.let { cur -> cur.wakeAt?.let { Stats.day(it, cur.endedAt, now, logs) } }
+                ?.let { it.copy(studyMin = it.studyMin + extraToday) },
+            extraStudyToday = extraToday,
+            loggedStudy = recent,
             breakSince = logs.firstOrNull { it.kind == ActivityKind.BREAK && it.endAt == null }?.startAt
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUi())
@@ -458,6 +473,8 @@ class NocViewModel(app: Application) : AndroidViewModel(app) {
     private val agent = NocAgent(repo)
     private var nextId = 1L
     private var lastUserText: String? = null
+    private var pending = 0
+    private val sendQueue = Channel<String>(Channel.UNLIMITED)
 
     // Chat lines are saved in order through one queue ("" role = clear everything).
     private val saveQueue = Channel<Pair<String, String>>(Channel.UNLIMITED)
@@ -477,6 +494,9 @@ class NocViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     init {
+        viewModelScope.launch {
+            for (t in sendQueue) process(t)
+        }
         viewModelScope.launch {
             for ((role, text) in saveQueue) {
                 try {
@@ -515,39 +535,47 @@ class NocViewModel(app: Application) : AndroidViewModel(app) {
 
     fun send(text: String) {
         val t = text.trim()
-        if (t.isEmpty() || sending || !loaded) return
+        if (t.isEmpty() || !loaded) return
         add(NocRole.USER, t)
-        run(t)
+        enqueue(t)
     }
 
     fun retry() {
         val t = lastUserText ?: return
         if (sending || !canRetry) return
         if (messages.lastOrNull()?.role == NocRole.ERROR) messages = messages.dropLast(1)
-        run(t)
+        enqueue(t)
     }
 
-    private fun run(t: String) {
+    /** Messages sent while Noc is still busy wait in line and are answered one after another. */
+    private fun enqueue(t: String) {
+        pending++
+        sending = true
+        sendQueue.trySend(t)
+    }
+
+    private suspend fun process(t: String) {
         lastUserText = t
         canRetry = false
-        sending = true
-        viewModelScope.launch {
-            var changes = 0
-            try {
-                val cfg = nocApp.nocStore.current()
-                val tone = repo.settings.current().tone
-                val reply = agent.chat(t, cfg, tone) {
-                    changes++
-                    add(NocRole.ACTION, it)
-                }
-                add(NocRole.NOC, reply)
-            } catch (e: Gemini.ApiException) {
-                fail(e.message ?: "Something went wrong.", changes)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                fail("Something went wrong: ${e.message ?: e.javaClass.simpleName}", changes)
-            } finally {
+        var changes = 0
+        try {
+            val cfg = nocApp.nocStore.current()
+            val tone = repo.settings.current().tone
+            val reply = agent.chat(t, cfg, tone) {
+                changes++
+                add(NocRole.ACTION, it)
+            }
+            add(NocRole.NOC, reply)
+        } catch (e: Gemini.ApiException) {
+            fail(e.message ?: "Something went wrong.", changes)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail("Something went wrong: ${e.message ?: e.javaClass.simpleName}", changes)
+        } finally {
+            pending--
+            if (pending <= 0) {
+                pending = 0
                 sending = false
             }
         }

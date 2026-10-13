@@ -27,7 +27,14 @@ object Migrations {
         }
     }
 
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+    // Biology was split into Botany and Zoology. Old Biology tasks keep their name as a custom subject.
+    val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("UPDATE tasks SET subject = 'CUSTOM', customSubject = 'Biology' WHERE subject = 'BIOLOGY'")
+        }
+    }
+
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 }
 
 @Database(
@@ -40,7 +47,7 @@ object Migrations {
         DailyReport::class,
         NocMessageEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {

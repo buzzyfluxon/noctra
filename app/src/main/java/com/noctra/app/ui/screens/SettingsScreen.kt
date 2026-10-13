@@ -42,8 +42,6 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.noctra.app.data.TimeUtil
-import com.noctra.app.data.UpdateChecker
-import com.noctra.app.data.UpdateInfo
 import kotlinx.coroutines.launch
 import com.noctra.app.notify.Perms
 import com.noctra.app.notify.rememberNotificationAsk
@@ -68,12 +66,6 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
         } catch (e: Exception) {
             "0"
         }
-    }
-    var upd by remember { mutableStateOf<UpdateInfo?>(null) }
-    var updMessage by remember { mutableStateOf<String?>(null) }
-    var checking by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        UpdateChecker.check(version).onSuccess { upd = it }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { perms = Perms.read(ctx) }
     val askNotifications = rememberNotificationAsk { perms = Perms.read(ctx) }
@@ -167,49 +159,6 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                 onClearKey = vm::clearNocKey,
                 onSaveModel = vm::setNocModel
             )
-
-            NcCard {
-                Text("App updates", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Installed version: $version",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                val info = upd
-                if (info != null && info.newer) {
-                    Text("Update available: version ${info.latest}", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Tap download, then open the downloaded file and tap Install. Your tasks and history are kept.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    PrimaryButton("DOWNLOAD UPDATE", {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.url)))
-                    }, Modifier.fillMaxWidth())
-                } else if (info != null) {
-                    Text("You are on the latest version.", style = MaterialTheme.typography.bodyMedium)
-                }
-                updMessage?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                Spacer(Modifier.height(8.dp))
-                SecondaryButton(
-                    if (checking) "CHECKING..." else "CHECK FOR UPDATES",
-                    {
-                        scope.launch {
-                            checking = true
-                            updMessage = null
-                            UpdateChecker.check(version)
-                                .onSuccess { upd = it }
-                                .onFailure { updMessage = "Could not check for updates. ${it.message ?: ""}" }
-                            checking = false
-                        }
-                    },
-                    Modifier.fillMaxWidth(),
-                    enabled = !checking
-                )
-            }
 
             NcCard {
                 Text("Notifications and reliability", style = MaterialTheme.typography.titleMedium)

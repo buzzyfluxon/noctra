@@ -216,7 +216,7 @@ private fun LogStudyDialog(
     var subject by remember { mutableStateOf(Subject.PHYSICS.label) }
     var note by remember { mutableStateOf("") }
     val total = (hours.toIntOrNull() ?: 0) * 60 + (mins.toIntOrNull() ?: 0)
-    val options = listOf(Subject.PHYSICS.label, Subject.CHEMISTRY.label, Subject.BIOLOGY.label) + subjects
+    val options = listOf(Subject.PHYSICS.label, Subject.CHEMISTRY.label, Subject.BOTANY.label, Subject.ZOOLOGY.label) + subjects
 
     AlertDialog(
         onDismissRequest = onDismiss,

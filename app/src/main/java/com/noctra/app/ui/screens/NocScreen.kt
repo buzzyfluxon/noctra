@@ -172,7 +172,7 @@ fun NocScreen(vm: NocViewModel = viewModel()) {
                     )
                     IconButton(
                         onClick = { vm.send(input); input = "" },
-                        enabled = input.isNotBlank() && !vm.sending && vm.loaded
+                        enabled = input.isNotBlank() && vm.loaded
                     ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = MaterialTheme.colorScheme.primary) }
                 }
             }
