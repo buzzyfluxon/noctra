@@ -42,6 +42,7 @@ import com.noctra.app.ui.screens.TaskEditScreen
 import com.noctra.app.ui.screens.TasksScreen
 import com.noctra.app.ui.screens.WakeScreen
 import com.noctra.app.ui.theme.NC
+import kotlinx.coroutines.flow.Flow
 
 object Routes {
     const val ONBOARD = "onboarding"
@@ -70,7 +71,8 @@ private val tabs = listOf(
 @Composable
 fun AppNav(externalRoute: String?, onRouteConsumed: () -> Unit) {
     val app = LocalContext.current.applicationContext as NoctraApp
-    val settingsState = app.repo.settings.flow.collectAsStateWithLifecycle<AppSettings, AppSettings?>(initialValue = null)
+    val settingsFlow: Flow<AppSettings?> = app.repo.settings.flow
+    val settingsState = settingsFlow.collectAsStateWithLifecycle(initialValue = null)
     val settings = settingsState.value
     if (settings == null) {
         Box(Modifier.fillMaxSize())
